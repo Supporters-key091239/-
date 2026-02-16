@@ -1,5 +1,30 @@
--- KS-Rivals Script Hub (Complete Fixed Integration v2.3)
--- Fixed: Client freeze issue, optimized initialization, deferred hooks
+-- ============================================
+-- VERSION CHECK & DUPLICATE PREVENTION
+-- ============================================
+
+local SCRIPT_VERSION = "2.3.1"
+local SCRIPT_IDENTIFIER = "KSRivalsHub_Main"
+
+-- Check if script is already running
+if _G[SCRIPT_IDENTIFIER] then
+    if _G[SCRIPT_IDENTIFIER].Version == SCRIPT_VERSION then
+        warn("⚠️ KS-Rivals Hub v" .. SCRIPT_VERSION .. " is already running!")
+        return
+    else
+        warn("🔄 Updating from v" .. _G[SCRIPT_IDENTIFIER].Version .. " to v" .. SCRIPT_VERSION)
+        -- Clean up old version
+        if _G[SCRIPT_IDENTIFIER].Cleanup then
+            pcall(_G[SCRIPT_IDENTIFIER].Cleanup)
+        end
+    end
+end
+
+-- Register this instance
+_G[SCRIPT_IDENTIFIER] = {
+    Version = SCRIPT_VERSION,
+    LoadTime = tick(),
+    Cleanup = nil -- Will be set later
+}
 
 local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
@@ -66,7 +91,7 @@ end
 local function startHealthMonitor()
     if connectionMonitor then connectionMonitor:Disconnect() end
     
-    connectionMonitor = RunService.Heartbeat:Connect(function()
+    connectionMonitor = trackConnection(RunService.Heartbeat:Connect(function()
         local currentTime = tick()
         
         -- Check if script hasn't updated in 5 seconds
@@ -77,7 +102,7 @@ local function startHealthMonitor()
         
         -- Update health check every frame
         checkScriptHealth()
-    end)
+    end))
 end
 
 -- ============================================
@@ -124,7 +149,66 @@ local function onCharacterAdded(character)
     checkScriptHealth()
 end
 
-LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
+trackConnection(LocalPlayer.CharacterAdded:Connect(onCharacterAdded))
+
+-- ============================================
+-- SCRIPT CLEANUP FUNCTION
+-- ============================================
+
+local allConnections = {}
+local function trackConnection(conn)
+    if conn then
+        table.insert(allConnections, conn)
+    end
+    return conn
+end
+
+local function cleanupScript()
+    -- Disconnect all connections
+    for _, conn in ipairs(allConnections) do
+        pcall(function()
+            if conn.Disconnect then
+                conn:Disconnect()
+            elseif conn.disconnect then
+                conn:disconnect()
+            end
+        end)
+    end
+    
+    -- Restore No Recoil
+    if nrGunModule and nrOriginalRecoil and nrOriginalStartShooting and nrOriginal_LocalTracers then
+        pcall(function()
+            nrGunModule._Recoil = nrOriginalRecoil
+            nrGunModule.StartShooting = nrOriginalStartShooting
+            nrGunModule._LocalTracers = nrOriginal_LocalTracers
+        end)
+    end
+    
+    -- Restore metatables
+    if metaTableHooked and oldNamecall then
+        pcall(function()
+            local mt = getrawmetatable(game)
+            pcall(function() setreadonly(mt, false) end)
+            pcall(function() make_writeable(mt) end)
+            mt.__namecall = oldNamecall
+            pcall(function() setreadonly(mt, true) end)
+            pcall(function() make_readonly(mt) end)
+        end)
+    end
+    
+    -- Remove GUIs
+    pcall(function()
+        if KSRivals then KSRivals:Destroy() end
+        if NotificationGui then NotificationGui:Destroy() end
+    end)
+    
+    -- Clear global reference
+    _G[SCRIPT_IDENTIFIER] = nil
+    
+    warn("✅ KS-Rivals Hub v" .. SCRIPT_VERSION .. " cleaned up successfully")
+end
+
+_G[SCRIPT_IDENTIFIER].Cleanup = cleanupScript
 
 -- ============================================
 -- SAFE INITIALIZATION UTILITIES
@@ -355,13 +439,20 @@ if savedConfig then
 end
 
 -- ============================================
--- AUTO-RELOAD SYSTEM
+-- AUTO-RELOAD SYSTEM (IMPROVED)
 -- ============================================
 
 local SCRIPT_URL = "https://raw.githubusercontent.com/Supporters-key091239/-/refs/heads/main/%E2%94%8A%E2%95%98%E2%95%9B%E2%96%89%F0%9F%82%A8%E2%94%A7"
 local BOOTSTRAP_CODE = [[
 repeat task.wait() until game:IsLoaded()
-task.wait(2)
+task.wait(3)
+
+-- Wait for old version to cleanup
+if _G.KSRivalsHub_Main and _G.KSRivalsHub_Main.Cleanup then
+    pcall(_G.KSRivalsHub_Main.Cleanup)
+    task.wait(1)
+end
+
 pcall(function()
     loadstring(game:HttpGet("]] .. SCRIPT_URL .. [[", true))()
 end)
@@ -373,12 +464,12 @@ local function setupAutoReload()
 end
 
 setupAutoReload()
-LocalPlayer.OnTeleport:Connect(function(state)
+trackConnection(LocalPlayer.OnTeleport:Connect(function(state)
     if state == Enum.TeleportState.Started then
         saveConfig()
         setupAutoReload()
     end
-end)
+end))
 
 -- ============================================
 -- NOTIFICATION SYSTEM
@@ -2558,4 +2649,7 @@ else
     RunLoadingSequence()
 end
 
-print("✅ KS-Rivals Hub v2.3 - Complete Fixed Version Loaded")
+print("✅ KS-Rivals Hub v" .. SCRIPT_VERSION .. " - Complete Fixed Version Loaded")
+print("📅 Load Time: " .. os.date("%X", _G[SCRIPT_IDENTIFIER].LoadTime))
+print("🔗 Auto-reload: Enabled")
+print("💾 Config: " .. (savedConfig and "Loaded" or "Default"))
