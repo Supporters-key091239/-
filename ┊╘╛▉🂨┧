@@ -1,4 +1,6 @@
--- KS-Rivals Script Hub (Full Auto Integration & HUB2 Update + Rage Bot - Fixed + Optimized + Loading System v2.2 + Team Check)
+-- KS-Rivals Script Hub (Complete Fixed Integration v2.3)
+-- Fixed: Client freeze issue, optimized initialization, deferred hooks
+
 local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -9,6 +11,29 @@ local HttpService = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 local Camera = workspace.CurrentCamera
+
+-- ============================================
+-- SAFE INITIALIZATION UTILITIES
+-- ============================================
+
+local function safeWait(instance, childName, timeout)
+    timeout = timeout or 5
+    local start = tick()
+    while tick() - start < timeout do
+        local child = instance:FindFirstChild(childName)
+        if child then return child end
+        task.wait(0.1)
+    end
+    return nil
+end
+
+local function safeRequire(module)
+    local success, result = pcall(function()
+        return require(module)
+    end)
+    if success then return result end
+    return nil
+end
 
 -- ============================================
 -- TEAM CHECK SYSTEM
@@ -93,7 +118,7 @@ local MIN_DISTANCE = 3
 local MAX_DISTANCE = 30
 local ZOOM_SPEED = 1.5
 
--- Full Auto 전용 변수
+-- Full Auto Variables
 local faTargetPlayer = nil
 local faIsAbove = false
 local faLastHealth = 100
@@ -113,14 +138,14 @@ local FA_RETREAT_INTERVAL = 2.5
 local faIsRetreating = false
 local faRetreatLock = false
 
--- No Cool Time 전용 변수
+-- No Cool Time Variables
 local noCoolTimeConnection = nil
 local noCoolTimeApplied = false
 local weaponDataCache = nil
 local lastCooldownRemoval = 0
 local COOLDOWN_REMOVAL_INTERVAL = 10
 
--- Rage Bot 전용 변수
+-- Rage Bot Variables
 local rbEnabled = false
 local rbTarget = nil
 local rbConnection = nil
@@ -128,7 +153,7 @@ local rbChar = nil
 local rbHrp = nil
 local rbHum = nil
 
--- No Recoil 전용 변수
+-- No Recoil Variables
 local nrGunModule = nil
 local nrItemLibrary = nil
 local nrOriginalRecoil = nil
@@ -136,7 +161,7 @@ local nrOriginalStartShooting = nil
 local nrOriginal_LocalTracers = nil
 local nrCrosshairProtected = false
 
--- Silent Aim 전용 변수
+-- Silent Aim Variables
 local silentAimActive = false
 local oldNamecall = nil
 local metaTableHooked = false
@@ -301,7 +326,7 @@ local function createNotification(text)
 end
 
 -- ============================================
--- SILENT AIM SYSTEM (NEW RAYCAST HOOK)
+-- SILENT AIM SYSTEM (DEFERRED HOOK)
 -- ============================================
 
 local function isVisible(targetHead)
@@ -395,82 +420,86 @@ end
 local function setupSilentAimHook()
     if metaTableHooked then return end
     
-    local success, mt = pcall(function()
-        return getrawmetatable(game)
-    end)
-    
-    if not success then
-        mt = getmetatable(game)
-    end
-    
-    oldNamecall = mt.__namecall
-    
-    pcall(function()
-        setreadonly(mt, false)
-    end)
-    
-    pcall(function()
-        make_writeable(mt)
-    end)
-    
-    mt.__namecall = newcclosure and newcclosure(function(self, ...)
-        local method = getnamecallmethod()
-        local args = {...}
+    task.spawn(function()
+        task.wait(2)
         
-        if method == "Raycast" and self == workspace then
-            local origin = args[1]
-            local direction = args[2]
-            local raycastParams = args[3]
-            
-            if shouldHookRaycast(origin, direction, raycastParams) then
-                local closestPlayer = getClosestPlayerForSilentAim()
-                if closestPlayer and closestPlayer.Character then
-                    local targetHead = closestPlayer.Character:FindFirstChild("Head")
-                    if targetHead then
-                        return createFakeRaycastResult(targetHead, origin)
-                    end
-                end
-                return nil
-            end
+        local success, mt = pcall(function()
+            return getrawmetatable(game)
+        end)
+        
+        if not success then
+            mt = getmetatable(game)
         end
         
-        return oldNamecall(self, ...)
-    end) or function(self, ...)
-        local method = getnamecallmethod()
-        local args = {...}
+        if not mt then return end
         
-        if method == "Raycast" and self == workspace then
-            local origin = args[1]
-            local direction = args[2]
-            local raycastParams = args[3]
+        oldNamecall = mt.__namecall
+        
+        pcall(function()
+            setreadonly(mt, false)
+        end)
+        
+        pcall(function()
+            make_writeable(mt)
+        end)
+        
+        mt.__namecall = newcclosure and newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            local args = {...}
             
-            if shouldHookRaycast(origin, direction, raycastParams) then
-                local closestPlayer = getClosestPlayerForSilentAim()
-                if closestPlayer and closestPlayer.Character then
-                    local targetHead = closestPlayer.Character:FindFirstChild("Head")
-                    if targetHead then
-                        return createFakeRaycastResult(targetHead, origin)
+            if method == "Raycast" and self == workspace then
+                local origin = args[1]
+                local direction = args[2]
+                local raycastParams = args[3]
+                
+                if shouldHookRaycast(origin, direction, raycastParams) then
+                    local closestPlayer = getClosestPlayerForSilentAim()
+                    if closestPlayer and closestPlayer.Character then
+                        local targetHead = closestPlayer.Character:FindFirstChild("Head")
+                        if targetHead then
+                            return createFakeRaycastResult(targetHead, origin)
+                        end
                     end
+                    return nil
                 end
-                return nil
             end
+            
+            return oldNamecall(self, ...)
+        end) or function(self, ...)
+            local method = getnamecallmethod()
+            local args = {...}
+            
+            if method == "Raycast" and self == workspace then
+                local origin = args[1]
+                local direction = args[2]
+                local raycastParams = args[3]
+                
+                if shouldHookRaycast(origin, direction, raycastParams) then
+                    local closestPlayer = getClosestPlayerForSilentAim()
+                    if closestPlayer and closestPlayer.Character then
+                        local targetHead = closestPlayer.Character:FindFirstChild("Head")
+                        if targetHead then
+                            return createFakeRaycastResult(targetHead, origin)
+                        end
+                    end
+                    return nil
+                end
+            end
+            
+            return oldNamecall(self, ...)
         end
         
-        return oldNamecall(self, ...)
-    end
-    
-    pcall(function()
-        setreadonly(mt, true)
+        pcall(function()
+            setreadonly(mt, true)
+        end)
+        
+        pcall(function()
+            make_readonly(mt)
+        end)
+        
+        metaTableHooked = true
     end)
-    
-    pcall(function()
-        make_readonly(mt)
-    end)
-    
-    metaTableHooked = true
 end
-
-setupSilentAimHook()
 
 -- ============================================
 -- UI SETUP
@@ -509,7 +538,7 @@ MainStroke.Thickness = 1
 MainStroke.Parent = MainFrame
 
 -- ============================================
--- KEYBIND INFO UI (Enhanced)
+-- KEYBIND INFO UI
 -- ============================================
 
 local KeybindInfoFrame = Instance.new("Frame")
@@ -559,10 +588,6 @@ KeybindInfo.TextXAlignment = Enum.TextXAlignment.Left
 KeybindInfo.TextYAlignment = Enum.TextYAlignment.Top
 KeybindInfo.TextWrapped = true
 
--- ============================================
--- KEYBIND INFO UPDATE FUNCTION
--- ============================================
-
 local function formatKeyName(enumItem)
     local name = enumItem.Name
     if name == "MouseButton1" then return "MB1" end
@@ -593,10 +618,6 @@ local function UpdateKeybindInfo()
     KeybindInfoFrame.Size = UDim2.new(0, 170, 0, newHeight)
     KeybindInfoFrame.Position = UDim2.new(1, -180, 0.5, -newHeight/2)
 end
-
--- ============================================
--- KEYBIND INFO ANIMATION FUNCTIONS
--- ============================================
 
 local KEYBIND_ANIMATION_PLAYING = false
 
@@ -716,7 +737,7 @@ LoadingSubtitle.Position = UDim2.new(0.5, 0, 0.38, 0)
 LoadingSubtitle.Size = UDim2.new(0.8, 0, 0, 20)
 LoadingSubtitle.AnchorPoint = Vector2.new(0.5, 0.5)
 LoadingSubtitle.Font = Enum.Font.GothamBold
-LoadingSubtitle.Text = "MADE BY TEAM KS"
+LoadingSubtitle.Text = "MADE BY TEAM KS - v2.3 FIXED"
 LoadingSubtitle.TextColor3 = Color3.fromRGB(100, 100, 100)
 LoadingSubtitle.TextSize = 11
 LoadingSubtitle.ZIndex = 101
@@ -784,10 +805,6 @@ LoadingPercent.TextSize = 16
 LoadingPercent.ZIndex = 101
 LoadingPercent.TextTransparency = 1
 
--- ============================================
--- CONTENT CONTAINER
--- ============================================
-
 local ContentContainer = Instance.new("Frame")
 ContentContainer.Name = "ContentContainer"
 ContentContainer.Parent = MainFrame
@@ -803,7 +820,7 @@ TopBar.BackgroundTransparency = 1
 TopBar.Parent = ContentContainer
 
 local Title = Instance.new("TextLabel")
-Title.Text = "KS-Rivals HUB2 - Integrated"
+Title.Text = "KS-Rivals HUB2 - v2.3 Fixed"
 Title.Font = Enum.Font.Code
 Title.TextColor3 = Color3.fromRGB(255, 255, 255)
 Title.TextSize = 13
@@ -863,10 +880,6 @@ VisualPage.BackgroundTransparency = 1
 VisualPage.Visible = false
 VisualPage.Parent = Content
 
--- ============================================
--- HELPER FUNCTION: Check if element should be excluded
--- ============================================
-
 local function IsToggleCheckInner(element)
     for _, checkInner in ipairs(ToggleCheckInners) do
         if element == checkInner then
@@ -875,10 +888,6 @@ local function IsToggleCheckInner(element)
     end
     return false
 end
-
--- ============================================
--- HUB ANIMATION FUNCTIONS
--- ============================================
 
 local function AnimateHubOpen()
     if HUB_ANIMATION_PLAYING then return end
@@ -1048,40 +1057,45 @@ local function EndLoadingAnimation(callback)
 end
 
 -- ============================================
--- NO RECOIL LOGIC
+-- NO RECOIL LOGIC (DEFERRED)
 -- ============================================
 
 local function initNoRecoilModules()
-    pcall(function()
-        local PlayerScripts = LocalPlayer:WaitForChild("PlayerScripts", 5)
-        if not PlayerScripts then return end
-        
-        for _, module in pairs(PlayerScripts:GetDescendants()) do
-            if module:IsA("ModuleScript") and module.Name == "Gun" then
-                nrGunModule = require(module)
-                break
+    task.spawn(function()
+        task.wait(1)
+        pcall(function()
+            local PlayerScripts = safeWait(LocalPlayer, "PlayerScripts", 5)
+            if not PlayerScripts then return end
+            
+            for _, module in pairs(PlayerScripts:GetDescendants()) do
+                if module:IsA("ModuleScript") and module.Name == "Gun" then
+                    nrGunModule = safeRequire(module)
+                    if nrGunModule then break end
+                end
+                task.wait(0.01)
             end
-        end
-        
-        if nrGunModule then
-            nrOriginalRecoil = nrGunModule._Recoil
-            nrOriginalStartShooting = nrGunModule.StartShooting
-            nrOriginal_LocalTracers = nrGunModule._LocalTracers
-        end
-        
-        local ItemLibraryModule = ReplicatedStorage:WaitForChild("Modules", 5)
-        if ItemLibraryModule then
-            ItemLibraryModule = ItemLibraryModule:WaitForChild("ItemLibrary", 5)
+            
+            if nrGunModule then
+                nrOriginalRecoil = nrGunModule._Recoil
+                nrOriginalStartShooting = nrGunModule.StartShooting
+                nrOriginal_LocalTracers = nrGunModule._LocalTracers
+            end
+            
+            local ItemLibraryModule = safeWait(ReplicatedStorage, "Modules", 5)
             if ItemLibraryModule then
-                nrItemLibrary = require(ItemLibraryModule)
+                ItemLibraryModule = safeWait(ItemLibraryModule, "ItemLibrary", 5)
+                if ItemLibraryModule then
+                    nrItemLibrary = safeRequire(ItemLibraryModule)
+                end
             end
-        end
+        end)
     end)
 end
 
 local function enableNoRecoil()
     if not nrGunModule then
         initNoRecoilModules()
+        task.wait(1)
         if not nrGunModule then
             createNotification("NoRecoil: Gun module not found")
             return
@@ -1111,12 +1125,13 @@ local function enableNoRecoil()
                     weaponData.ShootRecoil = 0
                     weaponData.AimSpreadMultiplier = 0
                 end
+                task.wait(0.01)
             end
         end
         
         if not nrCrosshairProtected then
             task.spawn(function()
-                local playerGui = LocalPlayer:WaitForChild("PlayerGui", 5)
+                local playerGui = safeWait(LocalPlayer, "PlayerGui", 5)
                 if not playerGui then return end
                 
                 local possiblePaths = {
@@ -1185,7 +1200,7 @@ local function disableNoRecoil()
 end
 
 -- ============================================
--- THIRD PERSON CAMERA LOGIC (Updated with Mouse Wheel Zoom)
+-- THIRD PERSON CAMERA LOGIC
 -- ============================================
 
 local function updateThirdPersonCamera()
@@ -1243,45 +1258,51 @@ local function disableThirdPerson()
 end
 
 -- ============================================
--- NO COOL TIME LOGIC
+-- NO COOL TIME LOGIC (DEFERRED)
 -- ============================================
 
 local function removeCooldowns()
     local currentTime = tick()
     if currentTime - lastCooldownRemoval < COOLDOWN_REMOVAL_INTERVAL then return noCoolTimeApplied end
-    local success, result = pcall(function()
-        if not weaponDataCache then
-            local modulesFolder = ReplicatedStorage:FindFirstChild("Modules")
-            if not modulesFolder then return false end
-            local possibleNames = {"ItemLibrary", "WeaponStats", "Items", "WeaponData", "Weapons"}
-            local weaponModule = nil
-            for _, name in ipairs(possibleNames) do
-                local found = modulesFolder:FindFirstChild(name)
-                if found then weaponModule = found break end
+    
+    task.spawn(function()
+        local success, result = pcall(function()
+            if not weaponDataCache then
+                local modulesFolder = ReplicatedStorage:FindFirstChild("Modules")
+                if not modulesFolder then return false end
+                local possibleNames = {"ItemLibrary", "WeaponStats", "Items", "WeaponData", "Weapons"}
+                local weaponModule = nil
+                for _, name in ipairs(possibleNames) do
+                    local found = modulesFolder:FindFirstChild(name)
+                    if found then weaponModule = found break end
+                end
+                if not weaponModule then return false end
+                weaponDataCache = safeRequire(weaponModule)
+                if not weaponDataCache then return false end
             end
-            if not weaponModule then return false end
-            weaponDataCache = require(weaponModule)
-        end
-        if not weaponDataCache.Items then return false end
-        for _, stats in pairs(weaponDataCache.Items) do
-            if stats.ShootCooldown then stats.ShootCooldown = 0 end
-            if stats.ShootBurstCooldown then stats.ShootBurstCooldown = 0 end
-            if stats.AttackCooldown then stats.AttackCooldown = 0 end
-            if stats.HeavyAttackCooldown then stats.HeavyAttackCooldown = 0 end
-            if stats.Cooldown then stats.Cooldown = 0 end
-            if stats.DeflectCooldown then stats.DeflectCooldown = 0 end
-            if stats.DashCooldown then stats.DashCooldown = 0 end
-            if stats.BuildCooldown then stats.BuildCooldown = 0 end
-            if stats.SpinCooldown then stats.SpinCooldown = 0 end
-            if stats.AirblastCooldown then stats.AirblastCooldown = 0 end
-            if stats.QuickShotCooldown then stats.QuickShotCooldown = 0 end
-            if stats.TransitionCooldown then stats.TransitionCooldown = 0 end
-            if stats.ReloadTime then stats.ReloadTime = 0.01 end
-        end
-        lastCooldownRemoval = currentTime
-        return true
+            if not weaponDataCache.Items then return false end
+            for _, stats in pairs(weaponDataCache.Items) do
+                if stats.ShootCooldown then stats.ShootCooldown = 0 end
+                if stats.ShootBurstCooldown then stats.ShootBurstCooldown = 0 end
+                if stats.AttackCooldown then stats.AttackCooldown = 0 end
+                if stats.HeavyAttackCooldown then stats.HeavyAttackCooldown = 0 end
+                if stats.Cooldown then stats.Cooldown = 0 end
+                if stats.DeflectCooldown then stats.DeflectCooldown = 0 end
+                if stats.DashCooldown then stats.DashCooldown = 0 end
+                if stats.BuildCooldown then stats.BuildCooldown = 0 end
+                if stats.SpinCooldown then stats.SpinCooldown = 0 end
+                if stats.AirblastCooldown then stats.AirblastCooldown = 0 end
+                if stats.QuickShotCooldown then stats.QuickShotCooldown = 0 end
+                if stats.TransitionCooldown then stats.TransitionCooldown = 0 end
+                if stats.ReloadTime then stats.ReloadTime = 0.01 end
+                task.wait(0.01)
+            end
+            lastCooldownRemoval = currentTime
+            return true
+        end)
+        noCoolTimeApplied = success and result
     end)
-    noCoolTimeApplied = success and result
+    
     return noCoolTimeApplied
 end
 
@@ -1297,7 +1318,7 @@ local function hookCharacterForNoCoolTime()
 end
 
 -- ============================================
--- RAGE BOT LOGIC (Team Check Integrated)
+-- RAGE BOT LOGIC
 -- ============================================
 
 local function rbUpdateCharacterRefs()
@@ -1359,7 +1380,7 @@ LocalPlayer.CharacterAdded:Connect(function(newChar)
 end)
 
 -- ============================================
--- FULL AUTO LOGIC (Team Check Integrated)
+-- FULL AUTO LOGIC
 -- ============================================
 
 local function faFindClosestPlayer()
@@ -1930,14 +1951,11 @@ local function createESP(player)
         bGui.AlwaysOnTop = true
         bGui.Enabled = ESP_ENABLED and isEnemy(player)
         
-        -- 메인 컨테이너 (투명)
         local container = Instance.new("Frame", bGui)
         container.Size = UDim2.new(1, 0, 1, 0)
         container.BackgroundTransparency = 1
         
-        -- 검은색 윤곽선을 가진 라인 생성 함수
         local function line(s, p)
-            -- 검은색 외곽선 (더 두껍게)
             local outline = Instance.new("Frame", container)
             outline.BackgroundColor3 = Color3.new(0, 0, 0)
             outline.BorderSizePixel = 0
@@ -1945,7 +1963,6 @@ local function createESP(player)
             outline.Position = UDim2.new(p.X.Scale, p.X.Offset - 1, p.Y.Scale, p.Y.Offset - 1)
             outline.ZIndex = 1
             
-            -- 흰색 메인 라인
             local f = Instance.new("Frame", container)
             f.BackgroundColor3 = Color3.new(1, 1, 1)
             f.BorderSizePixel = 0
@@ -1956,11 +1973,10 @@ local function createESP(player)
             return f, outline
         end
         
-        -- 박스의 4개 라인 그리기
-        line(UDim2.new(1, 0, 0, 1), UDim2.new(0, 0, 0, 0))       -- 상단
-        line(UDim2.new(1, 0, 0, 1), UDim2.new(0, 0, 1, -1))      -- 하단
-        line(UDim2.new(0, 1, 1, 0), UDim2.new(0, 0, 0, 0))       -- 좌측
-        line(UDim2.new(0, 1, 1, 0), UDim2.new(1, -1, 0, 0))      -- 우측
+        line(UDim2.new(1, 0, 0, 1), UDim2.new(0, 0, 0, 0))
+        line(UDim2.new(1, 0, 0, 1), UDim2.new(0, 0, 1, -1))
+        line(UDim2.new(0, 1, 1, 0), UDim2.new(0, 0, 0, 0))
+        line(UDim2.new(0, 1, 1, 0), UDim2.new(1, -1, 0, 0))
         
         local hGui = Instance.new("BillboardGui", root)
         hGui.Name = "HealthESP_Gui"
@@ -2199,114 +2215,162 @@ UserInputService.InputBegan:Connect(function(input, gpe)
     end
 end)
 
+-- ============================================
+-- MAIN LOADING SEQUENCE (ASYNC DEFERRED)
+-- ============================================
+
 local function RunLoadingSequence()
-    StartLoadingAnimation()
-    task.wait(0.5)
-    UpdateLoadingProgress(5, "Checking Core Services...")
-    task.wait(0.2)
-    UpdateLoadingProgress(15, "Core Services Ready")
-    task.wait(0.15)
-    UpdateLoadingProgress(20, "Waiting for Character...")
-    local charReady = false
-    for i = 1, 50 do
-        local char = LocalPlayer.Character
-        if char and char:FindFirstChild("HumanoidRootPart") and char:FindFirstChild("Humanoid") then
-            charReady = true
-            break
-        end
-        task.wait(0.05)
-    end
-    UpdateLoadingProgress(25, charReady and "Character Ready" or "Character Timeout")
-    task.wait(0.15)
-    UpdateLoadingProgress(30, "Initializing ESP System...")
-    for _, p in pairs(Players:GetPlayers()) do
-        pcall(function() createESP(p) end)
-    end
-    Players.PlayerAdded:Connect(createESP)
-    UpdateLoadingProgress(40, "ESP System Ready")
-    task.wait(0.15)
-    UpdateLoadingProgress(45, "Setting up Player Tracking...")
-    for _, p in ipairs(Players:GetPlayers()) do
-        pcall(function() setupPlayerTracking(p) end)
-    end
-    Players.PlayerAdded:Connect(setupPlayerTracking)
-    UpdateLoadingProgress(55, "Player Tracking Ready")
-    task.wait(0.15)
-    UpdateLoadingProgress(60, "Loading Weapon Modules...")
-    if NO_COOL_TIME_ENABLED then
-        pcall(function()
-            lastCooldownRemoval = 0
-            removeCooldowns()
-            if LocalPlayer.Character then hookCharacterForNoCoolTime() end
-            noCoolTimeConnection = task.spawn(function()
-                while NO_COOL_TIME_ENABLED do
-                    task.wait(10)
-                    if NO_COOL_TIME_ENABLED then pcall(removeCooldowns) end
-                end
-            end)
-        end)
-    end
-    if NO_RECOIL_ENABLED then
-        pcall(function()
-            initNoRecoilModules()
-            enableNoRecoil()
-        end)
-    end
-    UpdateLoadingProgress(70, "Weapon Modules Ready")
-    task.wait(0.15)
-    UpdateLoadingProgress(75, "Loading External Scripts...")
-    if SKIN_CHANGER_ENABLED then
-        local success = pcall(function()
-            loadstring(game:HttpGet("https://raw.githubusercontent.com/kgycoder/Rivals-Skin-changer/refs/heads/main/Rivals-Skin%20changer", true))()
-        end)
-        UpdateLoadingProgress(82, success and "Skin Changer Loaded" or "Skin Changer Failed")
-    else
-        UpdateLoadingProgress(82, "External Scripts Skipped")
-    end
-    task.wait(0.15)
-    UpdateLoadingProgress(88, "Initializing Auto Features...")
-    if FULL_AUTO_ENABLED then
-        pcall(function()
-            local character = LocalPlayer.Character
-            local humanoid = character and character:FindFirstChild("Humanoid")
-            faLastHealth = humanoid and humanoid.Health or 100
-            faIsFirstTeleport = true
-            faLastRetreatTime = tick()
-            faDisableGravity()
-            faStartSpinning()
-            faStartCameraLock()
-            faStartAutoClick()
-            if not faLoopActive then task.spawn(faMainLoop) end
-        end)
-    end
-    if AUTO_MATCH_ENABLED then pcall(attemptJoinMatch) end
-    if RAGE_BOT_ENABLED then pcall(rbUpdateCharacterRefs) end
-    if THIRD_PERSON_ENABLED then pcall(enableThirdPerson) end
-    UpdateLoadingProgress(95, "Auto Features Ready")
-    task.wait(0.15)
-    UpdateLoadingProgress(98, "Applying Configuration...")
-    updateESPStates()
-    ShowTab("Aim")
-    task.wait(0.1)
-    UpdateLoadingProgress(100, "All Systems Loaded!")
-    task.wait(0.2)
-    EndLoadingAnimation(function()
+    task.spawn(function()
+        StartLoadingAnimation()
         task.wait(0.5)
-        ShowKeybindInfo()
+        
+        UpdateLoadingProgress(5, "Checking Core Services...")
+        task.wait(0.2)
+        
+        setupSilentAimHook()
+        
+        UpdateLoadingProgress(15, "Core Services Ready")
+        task.wait(0.15)
+        UpdateLoadingProgress(20, "Waiting for Character...")
+        
+        local charReady = false
+        for i = 1, 50 do
+            local char = LocalPlayer.Character
+            if char and char:FindFirstChild("HumanoidRootPart") and char:FindFirstChild("Humanoid") then
+                charReady = true
+                break
+            end
+            task.wait(0.1)
+        end
+        
+        UpdateLoadingProgress(25, charReady and "Character Ready" or "Character Timeout")
+        task.wait(0.15)
+        
+        UpdateLoadingProgress(30, "Initializing ESP System...")
+        task.spawn(function()
+            for _, p in pairs(Players:GetPlayers()) do
+                pcall(function() createESP(p) end)
+                task.wait(0.01)
+            end
+        end)
+        Players.PlayerAdded:Connect(createESP)
+        UpdateLoadingProgress(40, "ESP System Ready")
+        task.wait(0.15)
+        
+        UpdateLoadingProgress(45, "Setting up Player Tracking...")
+        task.spawn(function()
+            for _, p in ipairs(Players:GetPlayers()) do
+                pcall(function() setupPlayerTracking(p) end)
+                task.wait(0.01)
+            end
+        end)
+        Players.PlayerAdded:Connect(setupPlayerTracking)
+        UpdateLoadingProgress(55, "Player Tracking Ready")
+        task.wait(0.15)
+        
+        UpdateLoadingProgress(60, "Loading Weapon Modules...")
+        if NO_COOL_TIME_ENABLED then
+            task.spawn(function()
+                pcall(function()
+                    lastCooldownRemoval = 0
+                    removeCooldowns()
+                    if LocalPlayer.Character then hookCharacterForNoCoolTime() end
+                    noCoolTimeConnection = task.spawn(function()
+                        while NO_COOL_TIME_ENABLED do
+                            task.wait(10)
+                            if NO_COOL_TIME_ENABLED then pcall(removeCooldowns) end
+                        end
+                    end)
+                end)
+            end)
+        end
+        if NO_RECOIL_ENABLED then
+            task.spawn(function()
+                pcall(function()
+                    initNoRecoilModules()
+                    task.wait(1)
+                    enableNoRecoil()
+                end)
+            end)
+        end
+        UpdateLoadingProgress(70, "Weapon Modules Ready")
+        task.wait(0.15)
+        
+        UpdateLoadingProgress(75, "Loading External Scripts...")
+        if SKIN_CHANGER_ENABLED then
+            task.spawn(function()
+                local success = pcall(function()
+                    loadstring(game:HttpGet("https://raw.githubusercontent.com/kgycoder/Rivals-Skin-changer/refs/heads/main/Rivals-Skin%20changer", true))()
+                end)
+                UpdateLoadingProgress(82, success and "Skin Changer Loaded" or "Skin Changer Failed")
+            end)
+            task.wait(0.3)
+        else
+            UpdateLoadingProgress(82, "External Scripts Skipped")
+        end
+        task.wait(0.15)
+        
+        UpdateLoadingProgress(88, "Initializing Auto Features...")
+        if FULL_AUTO_ENABLED then
+            task.spawn(function()
+                pcall(function()
+                    local character = LocalPlayer.Character
+                    local humanoid = character and character:FindFirstChild("Humanoid")
+                    faLastHealth = humanoid and humanoid.Health or 100
+                    faIsFirstTeleport = true
+                    faLastRetreatTime = tick()
+                    faDisableGravity()
+                    faStartSpinning()
+                    faStartCameraLock()
+                    faStartAutoClick()
+                    if not faLoopActive then task.spawn(faMainLoop) end
+                end)
+            end)
+        end
+        if AUTO_MATCH_ENABLED then pcall(attemptJoinMatch) end
+        if RAGE_BOT_ENABLED then pcall(rbUpdateCharacterRefs) end
+        if THIRD_PERSON_ENABLED then pcall(enableThirdPerson) end
+        UpdateLoadingProgress(95, "Auto Features Ready")
+        task.wait(0.15)
+        
+        UpdateLoadingProgress(98, "Applying Configuration...")
+        updateESPStates()
+        ShowTab("Aim")
+        task.wait(0.1)
+        
+        UpdateLoadingProgress(100, "All Systems Loaded!")
+        task.wait(0.2)
+        
+        EndLoadingAnimation(function()
+            task.wait(0.5)
+            ShowKeybindInfo()
+        end)
     end)
 end
+
+-- ============================================
+-- SCRIPT START
+-- ============================================
 
 if FULL_AUTO_ENABLED then
     LOADING_COMPLETE = true
     MainFrame.Visible = false
     LoadingOverlay.Visible = false
     ContentContainer.Visible = true
-    for _, p in pairs(Players:GetPlayers()) do
-        pcall(function() createESP(p) end)
-        pcall(function() setupPlayerTracking(p) end)
-    end
+    
+    task.spawn(function()
+        for _, p in pairs(Players:GetPlayers()) do
+            pcall(function() createESP(p) end)
+            pcall(function() setupPlayerTracking(p) end)
+            task.wait(0.01)
+        end
+    end)
+    
     Players.PlayerAdded:Connect(createESP)
     Players.PlayerAdded:Connect(setupPlayerTracking)
+    
+    setupSilentAimHook()
+    
     local character = LocalPlayer.Character
     local humanoid = character and character:FindFirstChild("Humanoid")
     faLastHealth = humanoid and humanoid.Health or 100
@@ -2321,29 +2385,37 @@ if FULL_AUTO_ENABLED then
     faStartCameraLock()
     faStartAutoClick()
     if not faLoopActive then task.spawn(faMainLoop) end
+    
     if AUTO_MATCH_ENABLED then attemptJoinMatch() end
     if SKIN_CHANGER_ENABLED then
-        pcall(function()
-            loadstring(game:HttpGet("https://raw.githubusercontent.com/kgycoder/Rivals-Skin-changer/refs/heads/main/Rivals-Skin%20changer", true))()
+        task.spawn(function()
+            pcall(function()
+                loadstring(game:HttpGet("https://raw.githubusercontent.com/kgycoder/Rivals-Skin-changer/refs/heads/main/Rivals-Skin%20changer", true))()
+            end)
         end)
     end
     if NO_COOL_TIME_ENABLED then
-        pcall(function()
-            lastCooldownRemoval = 0
-            removeCooldowns()
-            if LocalPlayer.Character then hookCharacterForNoCoolTime() end
-            noCoolTimeConnection = task.spawn(function()
-                while NO_COOL_TIME_ENABLED do
-                    task.wait(10)
-                    if NO_COOL_TIME_ENABLED then pcall(removeCooldowns) end
-                end
+        task.spawn(function()
+            pcall(function()
+                lastCooldownRemoval = 0
+                removeCooldowns()
+                if LocalPlayer.Character then hookCharacterForNoCoolTime() end
+                noCoolTimeConnection = task.spawn(function()
+                    while NO_COOL_TIME_ENABLED do
+                        task.wait(10)
+                        if NO_COOL_TIME_ENABLED then pcall(removeCooldowns) end
+                    end
+                end)
             end)
         end)
     end
     if NO_RECOIL_ENABLED then
-        pcall(function()
-            initNoRecoilModules()
-            enableNoRecoil()
+        task.spawn(function()
+            pcall(function()
+                initNoRecoilModules()
+                task.wait(1)
+                enableNoRecoil()
+            end)
         end)
     end
     if RAGE_BOT_ENABLED then rbUpdateCharacterRefs() end
@@ -2353,5 +2425,7 @@ if FULL_AUTO_ENABLED then
     task.wait(1)
     ShowKeybindInfo()
 else
-    task.spawn(RunLoadingSequence)
+    RunLoadingSequence()
 end
+
+print("✅ KS-Rivals Hub v2.3 - Complete Fixed Version Loaded")
