@@ -737,7 +737,7 @@ LoadingSubtitle.Position = UDim2.new(0.5, 0, 0.38, 0)
 LoadingSubtitle.Size = UDim2.new(0.8, 0, 0, 20)
 LoadingSubtitle.AnchorPoint = Vector2.new(0.5, 0.5)
 LoadingSubtitle.Font = Enum.Font.GothamBold
-LoadingSubtitle.Text = "MADE BY TEAM KS - v2.3 FIXED"
+LoadingSubtitle.Text = "MADE BY TEAM KS - v1.89 FIXED"
 LoadingSubtitle.TextColor3 = Color3.fromRGB(100, 100, 100)
 LoadingSubtitle.TextSize = 11
 LoadingSubtitle.ZIndex = 101
@@ -820,7 +820,7 @@ TopBar.BackgroundTransparency = 1
 TopBar.Parent = ContentContainer
 
 local Title = Instance.new("TextLabel")
-Title.Text = "KS-Rivals HUB2 - v2.3 Fixed"
+Title.Text = "KS-RIVALS HUB - 1.89"
 Title.Font = Enum.Font.Code
 Title.TextColor3 = Color3.fromRGB(255, 255, 255)
 Title.TextSize = 13
@@ -1076,9 +1076,16 @@ local function initNoRecoilModules()
             end
             
             if nrGunModule then
-                nrOriginalRecoil = nrGunModule._Recoil
-                nrOriginalStartShooting = nrGunModule.StartShooting
-                nrOriginal_LocalTracers = nrGunModule._LocalTracers
+                -- Store originals ONLY if not already stored
+                if not nrOriginalRecoil then
+                    nrOriginalRecoil = nrGunModule._Recoil
+                end
+                if not nrOriginalStartShooting then
+                    nrOriginalStartShooting = nrGunModule.StartShooting
+                end
+                if not nrOriginal_LocalTracers then
+                    nrOriginal_LocalTracers = nrGunModule._LocalTracers
+                end
             end
             
             local ItemLibraryModule = safeWait(ReplicatedStorage, "Modules", 5)
@@ -1093,30 +1100,57 @@ local function initNoRecoilModules()
 end
 
 local function enableNoRecoil()
+    -- Retry logic if modules not ready yet
+    local maxRetries = 5
+    local retryCount = 0
+    
+    while not nrGunModule and retryCount < maxRetries do
+        task.wait(0.5)
+        retryCount = retryCount + 1
+    end
+    
     if not nrGunModule then
-        initNoRecoilModules()
+        createNotification("NoRecoil: Gun module not found (retrying...)")
         task.wait(1)
-        if not nrGunModule then
-            createNotification("NoRecoil: Gun module not found")
-            return
-        end
+        initNoRecoilModules()
+        task.wait(2)
+    end
+    
+    if not nrGunModule then
+        createNotification("NoRecoil: Failed to load")
+        return
+    end
+    
+    -- Check if originals are properly stored
+    if not nrOriginalRecoil or not nrOriginalStartShooting or not nrOriginal_LocalTracers then
+        createNotification("NoRecoil: Original functions not found")
+        return
     end
     
     pcall(function()
-        nrGunModule._Recoil = function(self, multiplier)
-            return
-        end
-        
-        nrGunModule.StartShooting = function(self, arg2, arg3)
-            local success, event, cameraData, isAiming, extra1, extra2 = nrOriginalStartShooting(self, arg2, arg3)
-            if success then
-                return success, event, cameraData, true, extra1, extra2
+        -- Only override if not already overridden
+        if nrGunModule._Recoil ~= nrOriginalRecoil or type(nrGunModule._Recoil) == "function" then
+            nrGunModule._Recoil = function(self, multiplier)
+                return
             end
-            return success, event, cameraData, isAiming, extra1, extra2
         end
         
-        nrGunModule._LocalTracers = function(self, isAiming, arg3)
-            return nrOriginal_LocalTracers(self, true, arg3)
+        if nrGunModule.StartShooting ~= nrOriginalStartShooting or type(nrGunModule.StartShooting) == "function" then
+            nrGunModule.StartShooting = function(self, arg2, arg3)
+                -- Call the ORIGINAL stored function, not the current one
+                local success, event, cameraData, isAiming, extra1, extra2 = nrOriginalStartShooting(self, arg2, arg3)
+                if success then
+                    return success, event, cameraData, true, extra1, extra2
+                end
+                return success, event, cameraData, isAiming, extra1, extra2
+            end
+        end
+        
+        if nrGunModule._LocalTracers ~= nrOriginal_LocalTracers or type(nrGunModule._LocalTracers) == "function" then
+            nrGunModule._LocalTracers = function(self, isAiming, arg3)
+                -- Call the ORIGINAL stored function, not the current one
+                return nrOriginal_LocalTracers(self, true, arg3)
+            end
         end
         
         if nrItemLibrary and nrItemLibrary.Items then
@@ -2269,6 +2303,16 @@ local function RunLoadingSequence()
         task.wait(0.15)
         
         UpdateLoadingProgress(60, "Loading Weapon Modules...")
+        
+        -- Initialize No Recoil modules first (always initialize for faster toggle response)
+        task.spawn(function()
+            initNoRecoilModules()
+            task.wait(2)
+            if NO_RECOIL_ENABLED then
+                pcall(enableNoRecoil)
+            end
+        end)
+        
         if NO_COOL_TIME_ENABLED then
             task.spawn(function()
                 pcall(function()
@@ -2284,15 +2328,7 @@ local function RunLoadingSequence()
                 end)
             end)
         end
-        if NO_RECOIL_ENABLED then
-            task.spawn(function()
-                pcall(function()
-                    initNoRecoilModules()
-                    task.wait(1)
-                    enableNoRecoil()
-                end)
-            end)
-        end
+        
         UpdateLoadingProgress(70, "Weapon Modules Ready")
         task.wait(0.15)
         
@@ -2409,15 +2445,13 @@ if FULL_AUTO_ENABLED then
             end)
         end)
     end
-    if NO_RECOIL_ENABLED then
-        task.spawn(function()
-            pcall(function()
-                initNoRecoilModules()
-                task.wait(1)
-                enableNoRecoil()
-            end)
-        end)
-    end
+    task.spawn(function()
+        initNoRecoilModules()
+        task.wait(2)
+        if NO_RECOIL_ENABLED then
+            pcall(enableNoRecoil)
+        end
+    end)
     if RAGE_BOT_ENABLED then rbUpdateCharacterRefs() end
     if THIRD_PERSON_ENABLED then enableThirdPerson() end
     updateESPStates()
@@ -2427,5 +2461,3 @@ if FULL_AUTO_ENABLED then
 else
     RunLoadingSequence()
 end
-
-print("✅ KS-Rivals Hub v2.3 - Complete Fixed Version Loaded")
