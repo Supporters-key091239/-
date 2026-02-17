@@ -863,29 +863,40 @@ local function UpdateLoadingProgress(pct, status)
         {Size = UDim2.new(pct / 100, 0, 1, 0)}):Play()
 end
 
-local function StartLoadingAnimation()
-    MainFrame.Size                  = UDim2.new(0, 480, 0, 320)
-    MainFrame.Position              = UDim2.new(0.5, -240, 0.5, -160)
+-- [FIX v4-1] StartLoadingAnimation: task.wait 전부 제거 → Tween.Completed 체인
+-- 서버 전환 직후 무거운 VM 상황에서 task.wait가 누적 블로킹되던 문제 해결
+local function StartLoadingAnimation(onReady)
+    MainFrame.Size                   = UDim2.new(0, 480, 0, 320)
+    MainFrame.Position               = UDim2.new(0.5, -240, 0.5, -160)
     MainFrame.BackgroundTransparency = 1
-    MainStroke.Transparency         = 1
-    LoadingOverlay.Visible          = true
-    ContentContainer.Visible        = false
-    MainFrame.Visible               = true
-    TweenService:Create(MainFrame,
+    MainStroke.Transparency          = 1
+    LoadingOverlay.Visible           = true
+    ContentContainer.Visible         = false
+    MainFrame.Visible                = true
+
+    local tBg = TweenService:Create(MainFrame,
         TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
-        {BackgroundTransparency = 0}):Play()
+        {BackgroundTransparency = 0})
     TweenService:Create(MainStroke,
         TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
         {Transparency = 0}):Play()
-    task.wait(0.2)
-    TweenService:Create(LoadingTitle,        TweenInfo.new(0.3), {TextTransparency = 0}):Play()
-    task.wait(0.1)
-    TweenService:Create(LoadingSubtitle,     TweenInfo.new(0.3), {TextTransparency = 0}):Play()
-    task.wait(0.1)
-    TweenService:Create(ProgressBarBg,       TweenInfo.new(0.3), {BackgroundTransparency = 0}):Play()
-    TweenService:Create(ProgressBarBgStroke, TweenInfo.new(0.3), {Transparency = 0}):Play()
-    TweenService:Create(LoadingStatusText,   TweenInfo.new(0.3), {TextTransparency = 0}):Play()
-    TweenService:Create(LoadingPercent,      TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+    tBg:Play()
+
+    -- 체인: tBg 완료 → 0.2초 delay → 제목 → 부제 → 진행바 → onReady 콜백
+    TweenOnce(tBg, function()
+        task.delay(0.2, function()
+            TweenService:Create(LoadingTitle, TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+            task.delay(0.1, function()
+                TweenService:Create(LoadingSubtitle,     TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+                TweenService:Create(ProgressBarBg,       TweenInfo.new(0.3), {BackgroundTransparency = 0}):Play()
+                TweenService:Create(ProgressBarBgStroke, TweenInfo.new(0.3), {Transparency = 0}):Play()
+                TweenService:Create(LoadingStatusText,   TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+                TweenService:Create(LoadingPercent,      TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+                -- 애니메이션이 다 뜬 후 로딩 로직 시작
+                if onReady then task.delay(0.3, onReady) end
+            end)
+        end)
+    end)
 end
 
 local function EndLoadingAnimation(callback)
@@ -912,14 +923,30 @@ end
 
 -- ============================================
 -- NO RECOIL
+-- [FIX v4-2] initNoRecoilModules 완료 후 콜백으로 enableNoRecoil 자동 실행
 -- ============================================
 local nrGunModule, nrItemLibrary = nil, nil
 local nrOriginalRecoil, nrOriginalStartShooting, nrOriginal_LocalTracers = nil, nil, nil
+local nrInitInProgress = false  -- 중복 init 방지
 
-local function initNoRecoilModules()
+-- [FIX v4-2] onReady 콜백: 모듈 로드 완료 후 즉시 호출
+local function initNoRecoilModules(onReady)
+    if nrInitInProgress then
+        -- 이미 진행 중이면 완료 후 콜백 실행을 위해 폴링
+        if onReady then
+            task.spawn(function()
+                for _ = 1, 60 do  -- 최대 6초 대기
+                    task.wait(0.1)
+                    if nrGunModule then onReady(); return end
+                end
+            end)
+        end
+        return
+    end
+    nrInitInProgress = true
     task.spawn(function()
         local PlayerScripts = SafeWait(LocalPlayer, "PlayerScripts", 5)
-        if not PlayerScripts then return end
+        if not PlayerScripts then nrInitInProgress = false; return end
         for _, module in pairs(PlayerScripts:GetDescendants()) do
             if module:IsA("ModuleScript") and module.Name == "Gun" then
                 nrGunModule = SafeRequire(module)
@@ -935,6 +962,11 @@ local function initNoRecoilModules()
         if mods then
             local lib = mods:FindFirstChild("ItemLibrary")
             if lib then nrItemLibrary = SafeRequire(lib) end
+        end
+        nrInitInProgress = false
+        -- [FIX v4-2] 모듈 로드 완료 후 콜백 실행
+        if onReady and nrGunModule then
+            task.spawn(onReady)
         end
     end)
 end
@@ -1837,10 +1869,15 @@ end, "RageBotKeybind", RAGE_BOT_ENABLED)
 CreateToggle("No spread,recoil", AimPage, function(v)
     NO_RECOIL_ENABLED = v
     if v then
-        if not nrGunModule then initNoRecoilModules() end
-        task.delay(0.5, function()
-            if NO_RECOIL_ENABLED then enableNoRecoil() end
-        end)
+        if nrGunModule then
+            -- 이미 모듈이 있으면 즉시 적용
+            enableNoRecoil()
+        else
+            -- [FIX v4-2] 모듈 로드 완료 콜백으로 enableNoRecoil 전달
+            initNoRecoilModules(function()
+                if NO_RECOIL_ENABLED then enableNoRecoil() end
+            end)
+        end
     else
         disableNoRecoil()
     end
@@ -1933,59 +1970,68 @@ end)
 
 -- ============================================
 -- LOADING SEQUENCE
+-- [FIX v4-1] StartLoadingAnimation을 onReady 콜백 방식으로 호출
+-- [FIX v4-2] NoRecoil: initNoRecoilModules 완료 후 자동 enableNoRecoil
 -- ============================================
 local function RunLoadingSequence()
-    StartLoadingAnimation()
-    task.wait(0.5)
-    UpdateLoadingProgress(10, "Checking Services...")
-    task.wait(0.2)
-    UpdateLoadingProgress(20, "Waiting for Character...")
-    for _ = 1, 40 do
-        local char = LocalPlayer.Character
-        if char and char:FindFirstChild("HumanoidRootPart") then break end
-        task.wait(0.1)
-    end
+    -- [FIX v4-1] StartLoadingAnimation 완료 후 로딩 로직 시작 (task.wait 없음)
+    StartLoadingAnimation(function()
 
-    UpdateLoadingProgress(30, "Setting up ESP...")
-    for _, p in pairs(Players:GetPlayers()) do
-        pcall(function() createESP(p) end)
-    end
-    Players.PlayerAdded:Connect(createESP)
+        UpdateLoadingProgress(10, "Checking Services...")
+        task.wait(0.2)
+        UpdateLoadingProgress(20, "Waiting for Character...")
+        for _ = 1, 40 do
+            local char = LocalPlayer.Character
+            if char and char:FindFirstChild("HumanoidRootPart") then break end
+            task.wait(0.1)
+        end
 
-    UpdateLoadingProgress(45, "Player Tracking...")
-    for _, p in ipairs(Players:GetPlayers()) do
-        pcall(function() setupPlayerTracking(p) end)
-    end
-    Players.PlayerAdded:Connect(setupPlayerTracking)
+        UpdateLoadingProgress(30, "Setting up ESP...")
+        for _, p in pairs(Players:GetPlayers()) do
+            pcall(function() createESP(p) end)
+        end
+        Players.PlayerAdded:Connect(createESP)
 
-    UpdateLoadingProgress(60, "Loading Weapon Modules...")
-    if NO_RECOIL_ENABLED then initNoRecoilModules() end
-    if NO_COOL_TIME_ENABLED then
-        lastCooldownRemoval = 0
-        removeCooldowns()
-        startNoCoolTimeLoop()  -- [FIX-4]
-    end
+        UpdateLoadingProgress(45, "Player Tracking...")
+        for _, p in ipairs(Players:GetPlayers()) do
+            pcall(function() setupPlayerTracking(p) end)
+        end
+        Players.PlayerAdded:Connect(setupPlayerTracking)
 
-    UpdateLoadingProgress(75, "Loading External Scripts...")
-    if SKIN_CHANGER_ENABLED then
-        SafeLoadstring(
-            "https://raw.githubusercontent.com/kgycoder/Rivals-Skin-changer/refs/heads/main/Rivals-Skin%20changer",
-            nil, nil
-        )
-    end
+        UpdateLoadingProgress(60, "Loading Weapon Modules...")
+        -- [FIX v4-2] 모듈 로드 완료 후 자동으로 enableNoRecoil 실행
+        if NO_RECOIL_ENABLED then
+            initNoRecoilModules(function()
+                if NO_RECOIL_ENABLED then enableNoRecoil() end
+            end)
+        end
+        if NO_COOL_TIME_ENABLED then
+            lastCooldownRemoval = 0
+            removeCooldowns()
+            startNoCoolTimeLoop()
+        end
 
-    UpdateLoadingProgress(85, "Initializing Features...")
-    if AUTO_MATCH_ENABLED  then attemptJoinMatch() end
-    if RAGE_BOT_ENABLED    then rbUpdateCharacterRefs() end
-    if THIRD_PERSON_ENABLED then pcall(enableThirdPerson) end
-    updateESPStates()
-    ShowTab("Aim")
+        UpdateLoadingProgress(75, "Loading External Scripts...")
+        if SKIN_CHANGER_ENABLED then
+            SafeLoadstring(
+                "https://raw.githubusercontent.com/kgycoder/Rivals-Skin-changer/refs/heads/main/Rivals-Skin%20changer",
+                nil, nil
+            )
+        end
 
-    UpdateLoadingProgress(100, "All Systems Loaded!")
-    task.wait(0.2)
-    EndLoadingAnimation(function()
-        task.wait(0.5)
-        ShowKeybindInfo()
+        UpdateLoadingProgress(85, "Initializing Features...")
+        if AUTO_MATCH_ENABLED   then attemptJoinMatch() end
+        if RAGE_BOT_ENABLED     then rbUpdateCharacterRefs() end
+        if THIRD_PERSON_ENABLED then pcall(enableThirdPerson) end
+        updateESPStates()
+        ShowTab("Aim")
+
+        UpdateLoadingProgress(100, "All Systems Loaded!")
+        task.wait(0.2)
+        EndLoadingAnimation(function()
+            task.wait(0.5)
+            ShowKeybindInfo()
+        end)
     end)
 end
 
