@@ -1,6 +1,9 @@
--- KS-Rivals Script Hub - Config Save/Load Fix v3
--- 핵심 수정: defaultValue 시 callback 즉시 호출 + 저장 검증 + 상태 복원
+-- KS-Rivals Script Hub - Anti-Freeze Rebuild
+-- 모든 WaitForChild 타임아웃 추가, require pcall 래핑, 동기 블로킹 제거
 
+-- ============================================
+-- SERVICES
+-- ============================================
 local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -13,23 +16,28 @@ local Mouse = LocalPlayer:GetMouse()
 local Camera = workspace.CurrentCamera
 
 -- ============================================
--- SAFE HELPERS
+-- [FIX] 안전한 WaitForChild 래퍼 (타임아웃 보장)
 -- ============================================
 local function SafeWait(parent, name, timeout)
     timeout = timeout or 3
     if not parent then return nil end
-    local ok, result = pcall(function() return parent:WaitForChild(name, timeout) end)
-    return ok and result or nil
+    local ok, result = pcall(function()
+        return parent:WaitForChild(name, timeout)
+    end)
+    if ok then return result end
+    return nil
 end
 
+-- [FIX] 안전한 require 래퍼
 local function SafeRequire(module)
     if not module then return nil end
     local ok, result = pcall(require, module)
-    return ok and result or nil
+    if ok then return result end
+    return nil
 end
 
 -- ============================================
--- GUI 사전 정리
+-- [FIX] GUI 사전 정리
 -- ============================================
 pcall(function()
     for _, gui in ipairs(game:GetService("CoreGui"):GetChildren()) do
@@ -38,7 +46,9 @@ pcall(function()
 end)
 pcall(function()
     for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
-        if gui.Name == "NotificationSystem" or gui.Name == "KSRivals_Hub" then gui:Destroy() end
+        if gui.Name == "NotificationSystem" or gui.Name == "KSRivals_Hub" then
+            gui:Destroy()
+        end
     end
 end)
 pcall(function() RunService:UnbindFromRenderStep("ThirdPersonCamera") end)
@@ -50,8 +60,10 @@ local function getTeamID(player)
     local teamID = player:GetAttribute("TeamID")
     if teamID then return teamID end
     if player.Character then
-        local v = player.Character:FindFirstChild("TeamID")
-        if v and (v:IsA("StringValue") or v:IsA("IntValue")) then return v.Value end
+        local teamValue = player.Character:FindFirstChild("TeamID")
+        if teamValue and (teamValue:IsA("StringValue") or teamValue:IsA("IntValue")) then
+            return teamValue.Value
+        end
     end
     if player.Team then return player.Team.Name end
     return nil
@@ -59,135 +71,100 @@ end
 
 local function isEnemy(player)
     if not player or player == LocalPlayer then return false end
-    local a, b = getTeamID(LocalPlayer), getTeamID(player)
-    if not a or not b then return false end
-    return a ~= b
+    local myTeam = getTeamID(LocalPlayer)
+    local theirTeam = getTeamID(player)
+    if not myTeam or not theirTeam then return false end
+    return myTeam ~= theirTeam
 end
 
 -- ============================================
--- CONFIG - 기본값 정의
+-- CONFIG
 -- ============================================
-local Config = {
-    ESP_ENABLED          = false,
-    SILENT_AIM_ENABLED   = false,
-    HP_BAR_ENABLED       = false,
-    AIM_LOCK_ENABLED     = false,
-    AUTO_AIM_ENABLED     = false,
-    NOTIFICATION_ENABLED = false,
-    AUTO_MATCH_ENABLED   = false,
-    FULL_AUTO_ENABLED    = false,  -- [FIX] 항상 false로 시작
-    SKIN_CHANGER_ENABLED = false,
-    NO_COOL_TIME_ENABLED = false,
-    RAGE_BOT_ENABLED     = false,
-    THIRD_PERSON_ENABLED = false,
-    NO_RECOIL_ENABLED    = false,
-    AUTO_AIM_MODE        = "Silent",
-    AUTO_MATCH_MODE      = "1v1",
-    AIM_LOCK_KEY         = "Enum.UserInputType.MouseButton2",
-    RAGE_BOT_KEY         = "Enum.KeyCode.Five",
-}
+local ESP_ENABLED = false
+local SILENT_AIM_ENABLED = false
+local HP_BAR_ENABLED = false
+local AIM_LOCK_ENABLED = false
+local AUTO_AIM_ENABLED = false
+local NOTIFICATION_ENABLED = false
+local AUTO_MATCH_ENABLED = false
+local FULL_AUTO_ENABLED = false
+local SKIN_CHANGER_ENABLED = false
+local NO_COOL_TIME_ENABLED = false
+local RAGE_BOT_ENABLED = false
+local THIRD_PERSON_ENABLED = false
+local NO_RECOIL_ENABLED = false
+local AUTO_AIM_MODE = "Silent"
+local AUTO_MATCH_MODE = "1v1"
+local AIM_LOCK_KEY = Enum.UserInputType.MouseButton2
+local RAGE_BOT_KEY = Enum.KeyCode.Five
 
--- [FIX] 저장 함수 - 저장 성공 여부 반환
+local isAimLockHeld = false
+local aimLockConnection = nil
+local lastClickTime = 0
+local CLICK_INTERVAL = 0.01
+local LOADING_COMPLETE = false
+local HUB_ANIMATION_PLAYING = false
+local ToggleCheckInners = {}
+
 local function saveConfig()
-    local ok, err = pcall(function()
-        local data = {}
-        for k, v in pairs(Config) do data[k] = v end
-        -- Enum을 문자열로 변환
-        data.AIM_LOCK_KEY  = tostring(Config.AIM_LOCK_KEY)
-        data.RAGE_BOT_KEY  = tostring(Config.RAGE_BOT_KEY)
-        writefile("KSRivals_Config.json", HttpService:JSONEncode(data))
-    end)
-    return ok
+    local config = {
+        ESP_ENABLED = ESP_ENABLED, SILENT_AIM_ENABLED = SILENT_AIM_ENABLED,
+        HP_BAR_ENABLED = HP_BAR_ENABLED, AIM_LOCK_ENABLED = AIM_LOCK_ENABLED,
+        AUTO_AIM_ENABLED = AUTO_AIM_ENABLED, NOTIFICATION_ENABLED = NOTIFICATION_ENABLED,
+        AUTO_MATCH_ENABLED = AUTO_MATCH_ENABLED, FULL_AUTO_ENABLED = FULL_AUTO_ENABLED,
+        SKIN_CHANGER_ENABLED = SKIN_CHANGER_ENABLED, NO_COOL_TIME_ENABLED = NO_COOL_TIME_ENABLED,
+        RAGE_BOT_ENABLED = RAGE_BOT_ENABLED, THIRD_PERSON_ENABLED = THIRD_PERSON_ENABLED,
+        NO_RECOIL_ENABLED = NO_RECOIL_ENABLED, AUTO_AIM_MODE = AUTO_AIM_MODE,
+        AUTO_MATCH_MODE = AUTO_MATCH_MODE, AIM_LOCK_KEY = tostring(AIM_LOCK_KEY),
+        RAGE_BOT_KEY = tostring(RAGE_BOT_KEY)
+    }
+    pcall(function() writefile("KSRivals_Config.json", HttpService:JSONEncode(config)) end)
 end
 
--- [FIX] 로드 함수 - 각 값 타입 검증 포함
+-- [FIX] config 로드 시 FULL_AUTO 강제 비활성화 (프리즈 방지)
 local function loadConfig()
-    local ok, data = pcall(function()
-        if not (isfile and isfile("KSRivals_Config.json")) then return nil end
-        return HttpService:JSONDecode(readfile("KSRivals_Config.json"))
+    local ok, result = pcall(function()
+        if isfile and isfile("KSRivals_Config.json") then
+            return HttpService:JSONDecode(readfile("KSRivals_Config.json"))
+        end
+        return nil
     end)
-    if not ok or not data then return end
+    if ok then return result end
+    return nil
+end
 
-    -- boolean 값들 복원
-    local boolKeys = {
-        "ESP_ENABLED","SILENT_AIM_ENABLED","HP_BAR_ENABLED","AIM_LOCK_ENABLED",
-        "AUTO_AIM_ENABLED","NOTIFICATION_ENABLED","AUTO_MATCH_ENABLED",
-        "SKIN_CHANGER_ENABLED","NO_COOL_TIME_ENABLED","RAGE_BOT_ENABLED",
-        "THIRD_PERSON_ENABLED","NO_RECOIL_ENABLED"
-    }
-    for _, k in ipairs(boolKeys) do
-        if type(data[k]) == "boolean" then Config[k] = data[k] end
-    end
-
-    -- string 값들 복원
-    if type(data.AUTO_AIM_MODE) == "string" then Config.AUTO_AIM_MODE = data.AUTO_AIM_MODE end
-    if type(data.AUTO_MATCH_MODE) == "string" then Config.AUTO_MATCH_MODE = data.AUTO_MATCH_MODE end
-
-    -- [FIX] FULL_AUTO는 저장값 무시 (즉시 실행 시 프리즈 방지)
-    Config.FULL_AUTO_ENABLED = false
-
-    -- Enum 복원
-    if type(data.AIM_LOCK_KEY) == "string" then
+local savedConfig = loadConfig()
+if savedConfig then
+    ESP_ENABLED = savedConfig.ESP_ENABLED or false
+    SILENT_AIM_ENABLED = savedConfig.SILENT_AIM_ENABLED or false
+    HP_BAR_ENABLED = savedConfig.HP_BAR_ENABLED or false
+    AIM_LOCK_ENABLED = savedConfig.AIM_LOCK_ENABLED or false
+    AUTO_AIM_ENABLED = savedConfig.AUTO_AIM_ENABLED or false
+    NOTIFICATION_ENABLED = savedConfig.NOTIFICATION_ENABLED or false
+    AUTO_MATCH_ENABLED = savedConfig.AUTO_MATCH_ENABLED or false
+    -- [FIX] FULL_AUTO는 항상 false로 시작 (저장값 무시) - 즉시 실행 시 프리즈 원인
+    FULL_AUTO_ENABLED = false
+    SKIN_CHANGER_ENABLED = savedConfig.SKIN_CHANGER_ENABLED or false
+    NO_COOL_TIME_ENABLED = savedConfig.NO_COOL_TIME_ENABLED or false
+    RAGE_BOT_ENABLED = savedConfig.RAGE_BOT_ENABLED or false
+    THIRD_PERSON_ENABLED = savedConfig.THIRD_PERSON_ENABLED or false
+    NO_RECOIL_ENABLED = savedConfig.NO_RECOIL_ENABLED or false
+    AUTO_AIM_MODE = savedConfig.AUTO_AIM_MODE or "Silent"
+    AUTO_MATCH_MODE = savedConfig.AUTO_MATCH_MODE or "1v1"
+    if savedConfig.AIM_LOCK_KEY then
         pcall(function()
-            local s = data.AIM_LOCK_KEY
-            if s:find("MouseButton") then
-                local name = s:match("%.(%w+)$")
-                Config.AIM_LOCK_KEY = Enum.UserInputType[name]
+            if savedConfig.AIM_LOCK_KEY:find("MouseButton") then
+                AIM_LOCK_KEY = Enum.UserInputType[savedConfig.AIM_LOCK_KEY:split(".")[3]]
             else
-                local name = s:match("%.(%w+)$")
-                Config.AIM_LOCK_KEY = Enum.KeyCode[name]
+                AIM_LOCK_KEY = Enum.KeyCode[savedConfig.AIM_LOCK_KEY:split(".")[3]]
             end
         end)
     end
-    if type(data.RAGE_BOT_KEY) == "string" then
+    if savedConfig.RAGE_BOT_KEY then
         pcall(function()
-            local name = data.RAGE_BOT_KEY:match("%.(%w+)$")
-            Config.RAGE_BOT_KEY = Enum.KeyCode[name]
+            RAGE_BOT_KEY = Enum.KeyCode[savedConfig.RAGE_BOT_KEY:split(".")[3]]
         end)
     end
-end
-
-loadConfig()
-
--- Config 값들을 로컬 변수로 별칭 (기존 코드 호환성)
-local ESP_ENABLED          = Config.ESP_ENABLED
-local SILENT_AIM_ENABLED   = Config.SILENT_AIM_ENABLED
-local HP_BAR_ENABLED       = Config.HP_BAR_ENABLED
-local AIM_LOCK_ENABLED     = Config.AIM_LOCK_ENABLED
-local AUTO_AIM_ENABLED     = Config.AUTO_AIM_ENABLED
-local NOTIFICATION_ENABLED = Config.NOTIFICATION_ENABLED
-local AUTO_MATCH_ENABLED   = Config.AUTO_MATCH_ENABLED
-local FULL_AUTO_ENABLED    = Config.FULL_AUTO_ENABLED
-local SKIN_CHANGER_ENABLED = Config.SKIN_CHANGER_ENABLED
-local NO_COOL_TIME_ENABLED = Config.NO_COOL_TIME_ENABLED
-local RAGE_BOT_ENABLED     = Config.RAGE_BOT_ENABLED
-local THIRD_PERSON_ENABLED = Config.THIRD_PERSON_ENABLED
-local NO_RECOIL_ENABLED    = Config.NO_RECOIL_ENABLED
-local AUTO_AIM_MODE        = Config.AUTO_AIM_MODE
-local AUTO_MATCH_MODE      = Config.AUTO_MATCH_MODE
-local AIM_LOCK_KEY         = Config.AIM_LOCK_KEY
-local RAGE_BOT_KEY         = Config.RAGE_BOT_KEY
-
--- [FIX] Config 동기화 함수 - 로컬 변수 변경 시 Config 테이블도 갱신
-local function syncAndSave()
-    Config.ESP_ENABLED          = ESP_ENABLED
-    Config.SILENT_AIM_ENABLED   = SILENT_AIM_ENABLED
-    Config.HP_BAR_ENABLED       = HP_BAR_ENABLED
-    Config.AIM_LOCK_ENABLED     = AIM_LOCK_ENABLED
-    Config.AUTO_AIM_ENABLED     = AUTO_AIM_ENABLED
-    Config.NOTIFICATION_ENABLED = NOTIFICATION_ENABLED
-    Config.AUTO_MATCH_ENABLED   = AUTO_MATCH_ENABLED
-    Config.FULL_AUTO_ENABLED    = FULL_AUTO_ENABLED
-    Config.SKIN_CHANGER_ENABLED = SKIN_CHANGER_ENABLED
-    Config.NO_COOL_TIME_ENABLED = NO_COOL_TIME_ENABLED
-    Config.RAGE_BOT_ENABLED     = RAGE_BOT_ENABLED
-    Config.THIRD_PERSON_ENABLED = THIRD_PERSON_ENABLED
-    Config.NO_RECOIL_ENABLED    = NO_RECOIL_ENABLED
-    Config.AUTO_AIM_MODE        = AUTO_AIM_MODE
-    Config.AUTO_MATCH_MODE      = AUTO_MATCH_MODE
-    Config.AIM_LOCK_KEY         = AIM_LOCK_KEY
-    Config.RAGE_BOT_KEY         = RAGE_BOT_KEY
-    saveConfig()
 end
 
 -- ============================================
@@ -208,11 +185,11 @@ local function setupAutoReload()
 end
 setupAutoReload()
 LocalPlayer.OnTeleport:Connect(function(state)
-    if state == Enum.TeleportState.Started then syncAndSave(); setupAutoReload() end
+    if state == Enum.TeleportState.Started then saveConfig() setupAutoReload() end
 end)
 
 -- ============================================
--- NOTIFICATION
+-- NOTIFICATION SYSTEM
 -- ============================================
 local NotificationGui = Instance.new("ScreenGui")
 NotificationGui.Name = "NotificationSystem"
@@ -224,7 +201,11 @@ NotifContainer.Size = UDim2.new(0, 200, 0, 400)
 NotifContainer.Position = UDim2.new(0, 10, 0, 10)
 NotifContainer.BackgroundTransparency = 1
 NotifContainer.Parent = NotificationGui
-Instance.new("UIListLayout", NotifContainer).Padding = UDim.new(0, 4)
+
+local NotifLayout = Instance.new("UIListLayout")
+NotifLayout.SortOrder = Enum.SortOrder.LayoutOrder
+NotifLayout.Padding = UDim.new(0, 4)
+NotifLayout.Parent = NotifContainer
 
 local function createNotification(text)
     if not NOTIFICATION_ENABLED then return end
@@ -235,7 +216,9 @@ local function createNotification(text)
     notif.BorderSizePixel = 0
     notif.ClipsDescendants = true
     notif.Parent = NotifContainer
-    Instance.new("UICorner", notif).CornerRadius = UDim.new(0, 4)
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = notif
     local label = Instance.new("TextLabel")
     label.Size = UDim2.new(1, -10, 1, 0)
     label.Position = UDim2.new(0, 5, 0, 0)
@@ -250,73 +233,88 @@ local function createNotification(text)
     task.delay(2, function()
         if notif and notif.Parent then
             local t = TweenService:Create(notif, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Size = UDim2.new(0, 0, 0, 22)})
-            t:Play(); t.Completed:Connect(function() if notif then notif:Destroy() end end)
+            t:Play()
+            t.Completed:Connect(function() if notif then notif:Destroy() end end)
         end
     end)
 end
 
 -- ============================================
--- SILENT AIM (비동기 훅)
+-- SILENT AIM
+-- [FIX] 메타테이블 훅을 task.spawn으로 비동기 처리
 -- ============================================
 local metaTableHooked = false
 local oldNamecall = nil
 
 local function isVisible(targetHead)
     if not targetHead then return false end
-    local char = LocalPlayer.Character
-    if not char then return false end
-    local rp = RaycastParams.new()
-    rp.FilterDescendantsInstances = {char}
-    rp.FilterType = Enum.RaycastFilterType.Exclude
-    local ray = workspace:Raycast(Camera.CFrame.Position, targetHead.Position - Camera.CFrame.Position, rp)
-    return not ray or ray.Instance:IsDescendantOf(targetHead.Parent)
+    local character = LocalPlayer.Character
+    if not character then return false end
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {character}
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    local origin = Camera.CFrame.Position
+    local ray = workspace:Raycast(origin, targetHead.Position - origin, rayParams)
+    if not ray then return true end
+    return ray.Instance:IsDescendantOf(targetHead.Parent)
 end
 
 local function getClosestPlayerForSilentAim()
     if not SILENT_AIM_ENABLED then return nil end
-    local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
-    local closest, minD = nil, math.huge
-    local sc = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and isEnemy(p) and p.Character then
-            local head = p.Character:FindFirstChild("Head")
-            local hum  = p.Character:FindFirstChild("Humanoid")
+    local character = LocalPlayer.Character
+    if not character or not character:FindFirstChild("HumanoidRootPart") then return nil end
+    local closestPlayer = nil
+    local shortestDist = math.huge
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and isEnemy(player) and player.Character then
+            local head = player.Character:FindFirstChild("Head")
+            local hum = player.Character:FindFirstChild("Humanoid")
             if head and hum and hum.Health > 0 then
-                local sp, on = Camera:WorldToScreenPoint(head.Position)
-                if on and isVisible(head) then
-                    local d = (Vector2.new(sp.X, sp.Y) - sc).Magnitude
-                    if d < minD then minD = d; closest = p end
+                local sp, onScreen = Camera:WorldToScreenPoint(head.Position)
+                if onScreen and isVisible(head) then
+                    local d = (Vector2.new(sp.X, sp.Y) - screenCenter).Magnitude
+                    if d < shortestDist then shortestDist = d; closestPlayer = player end
                 end
             end
         end
     end
-    return closest
+    return closestPlayer
 end
 
-local function createFakeRaycastResult(head, origin)
-    if not head then return nil end
-    local dir = (head.Position - origin).Unit
-    return {Instance=head, Position=head.Position, Distance=(head.Position-origin).Magnitude, Material=head.Material, Normal=-dir}
+local function createFakeRaycastResult(targetHead, rayOrigin)
+    if not targetHead then return nil end
+    local dir = (targetHead.Position - rayOrigin).Unit
+    return {
+        Instance = targetHead, Position = targetHead.Position,
+        Distance = (targetHead.Position - rayOrigin).Magnitude,
+        Material = targetHead.Material, Normal = -dir,
+    }
 end
 
 local function shouldHookRaycast(origin, direction, rp)
-    if not SILENT_AIM_ENABLED or not rp then return false end
+    if not SILENT_AIM_ENABLED then return false end
+    if not rp then return false end
     if rp.FilterType ~= Enum.RaycastFilterType.Include then return false end
     if direction.Magnitude < 10 then return false end
-    return (origin - Camera.CFrame.Position).Magnitude <= 5
+    if (origin - Camera.CFrame.Position).Magnitude > 5 then return false end
+    return true
 end
 
+-- [FIX] 메타테이블 훅을 task.spawn으로 분리하여 메인 스레드 블로킹 방지
 task.spawn(function()
     if metaTableHooked then return end
     local ok, mt = pcall(getrawmetatable, game)
     if not ok or not mt then return end
+
     local orig = mt.__namecall
     if not orig then return end
     oldNamecall = orig
-    pcall(setreadonly, mt, false)
-    pcall(function() make_writeable(mt) end)
-    local function hookFn(self, ...)
+
+    local writeOk = pcall(setreadonly, mt, false)
+    if not writeOk then pcall(function() make_writeable(mt) end) end
+
+    local hookFn = function(self, ...)
         local method = getnamecallmethod()
         if method == "Raycast" and self == workspace then
             local args = {...}
@@ -331,14 +329,19 @@ task.spawn(function()
         end
         return orig(self, ...)
     end
-    local set = pcall(function() mt.__namecall = newcclosure and newcclosure(hookFn) or hookFn end)
+
+    local hookSet = pcall(function()
+        mt.__namecall = newcclosure and newcclosure(hookFn) or hookFn
+    end)
+
     pcall(setreadonly, mt, true)
     pcall(function() make_readonly(mt) end)
-    if set then metaTableHooked = true end
+
+    if hookSet then metaTableHooked = true end
 end)
 
 -- ============================================
--- UI 기본 구조
+-- UI SETUP
 -- ============================================
 local KSRivals = Instance.new("ScreenGui")
 KSRivals.Name = "KSRivals_Hub"
@@ -361,7 +364,7 @@ MainStroke.Color = Color3.fromRGB(255, 255, 255)
 MainStroke.Thickness = 1
 MainStroke.Parent = MainFrame
 
--- Keybind Info
+-- KEYBIND INFO
 local KeybindInfoFrame = Instance.new("Frame")
 KeybindInfoFrame.Name = "KeybindInfoFrame"
 KeybindInfoFrame.Parent = KSRivals
@@ -372,18 +375,40 @@ KeybindInfoFrame.Size = UDim2.new(0, 170, 0, 100)
 KeybindInfoFrame.BorderSizePixel = 0
 KeybindInfoFrame.Visible = false
 KeybindInfoFrame.ClipsDescendants = true
-local KbStroke = Instance.new("UIStroke")
-KbStroke.Color = Color3.fromRGB(255,255,255); KbStroke.Thickness = 1; KbStroke.Transparency = 0.3; KbStroke.Parent = KeybindInfoFrame
-Instance.new("UICorner", KeybindInfoFrame).CornerRadius = UDim.new(0,4)
-local KbTitle = Instance.new("TextLabel"); KbTitle.Parent = KeybindInfoFrame
-KbTitle.BackgroundTransparency = 1; KbTitle.Position = UDim2.new(0,10,0,8); KbTitle.Size = UDim2.new(1,-20,0,16)
-KbTitle.Font = Enum.Font.GothamBold; KbTitle.Text = "KEYBINDS"; KbTitle.TextColor3 = Color3.fromRGB(255,255,255)
-KbTitle.TextSize = 12; KbTitle.TextXAlignment = Enum.TextXAlignment.Left
-local KbInfo = Instance.new("TextLabel"); KbInfo.Parent = KeybindInfoFrame
-KbInfo.BackgroundTransparency = 1; KbInfo.Position = UDim2.new(0,10,0,28); KbInfo.Size = UDim2.new(1,-20,1,-36)
-KbInfo.Font = Enum.Font.Code; KbInfo.Text = ""; KbInfo.TextColor3 = Color3.fromRGB(200,200,200)
-KbInfo.TextSize = 11; KbInfo.TextXAlignment = Enum.TextXAlignment.Left
-KbInfo.TextYAlignment = Enum.TextYAlignment.Top; KbInfo.TextWrapped = true
+
+local KeybindStroke = Instance.new("UIStroke")
+KeybindStroke.Color = Color3.fromRGB(255, 255, 255)
+KeybindStroke.Thickness = 1
+KeybindStroke.Transparency = 0.3
+KeybindStroke.Parent = KeybindInfoFrame
+
+local KeybindCorner = Instance.new("UICorner")
+KeybindCorner.CornerRadius = UDim.new(0, 4)
+KeybindCorner.Parent = KeybindInfoFrame
+
+local KeybindTitle = Instance.new("TextLabel")
+KeybindTitle.Parent = KeybindInfoFrame
+KeybindTitle.BackgroundTransparency = 1
+KeybindTitle.Position = UDim2.new(0, 10, 0, 8)
+KeybindTitle.Size = UDim2.new(1, -20, 0, 16)
+KeybindTitle.Font = Enum.Font.GothamBold
+KeybindTitle.Text = "KEYBINDS"
+KeybindTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+KeybindTitle.TextSize = 12
+KeybindTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local KeybindInfo = Instance.new("TextLabel")
+KeybindInfo.Parent = KeybindInfoFrame
+KeybindInfo.BackgroundTransparency = 1
+KeybindInfo.Position = UDim2.new(0, 10, 0, 28)
+KeybindInfo.Size = UDim2.new(1, -20, 1, -36)
+KeybindInfo.Font = Enum.Font.Code
+KeybindInfo.Text = ""
+KeybindInfo.TextColor3 = Color3.fromRGB(200, 200, 200)
+KeybindInfo.TextSize = 11
+KeybindInfo.TextXAlignment = Enum.TextXAlignment.Left
+KeybindInfo.TextYAlignment = Enum.TextYAlignment.Top
+KeybindInfo.TextWrapped = true
 
 local function formatKeyName(e)
     local n = e.Name
@@ -394,12 +419,12 @@ end
 
 local function UpdateKeybindInfo()
     local lines = {"Hub Toggle: [K]"}
-    if AIM_LOCK_ENABLED then table.insert(lines, "Aim Lock: ["..formatKeyName(AIM_LOCK_KEY).."]") end
-    if RAGE_BOT_ENABLED then table.insert(lines, "Rage Bot: ["..formatKeyName(RAGE_BOT_KEY).."]") end
-    KbInfo.Text = table.concat(lines, "\n")
+    if AIM_LOCK_ENABLED then table.insert(lines, "Aim Lock: [" .. formatKeyName(AIM_LOCK_KEY) .. "]") end
+    if RAGE_BOT_ENABLED then table.insert(lines, "Rage Bot: [" .. formatKeyName(RAGE_BOT_KEY) .. "]") end
+    KeybindInfo.Text = table.concat(lines, "\n")
     local h = (#lines * 15) + 30
-    KeybindInfoFrame.Size = UDim2.new(0,170,0,h)
-    KeybindInfoFrame.Position = UDim2.new(1,-180,0.5,-h/2)
+    KeybindInfoFrame.Size = UDim2.new(0, 170, 0, h)
+    KeybindInfoFrame.Position = UDim2.new(1, -180, 0.5, -h/2)
 end
 
 local KEYBIND_ANIM = false
@@ -408,102 +433,192 @@ local function ShowKeybindInfo()
     KEYBIND_ANIM = true
     UpdateKeybindInfo()
     local h = KeybindInfoFrame.Size.Y.Offset
-    KeybindInfoFrame.Size = UDim2.new(0,0,0,h); KeybindInfoFrame.Position = UDim2.new(1,0,0.5,-h/2)
-    KeybindInfoFrame.BackgroundTransparency = 1; KbStroke.Transparency = 1
-    KbTitle.TextTransparency = 1; KbInfo.TextTransparency = 1; KeybindInfoFrame.Visible = true
+    KeybindInfoFrame.Size = UDim2.new(0, 0, 0, h)
+    KeybindInfoFrame.Position = UDim2.new(1, 0, 0.5, -h/2)
+    KeybindInfoFrame.BackgroundTransparency = 1
+    KeybindStroke.Transparency = 1
+    KeybindTitle.TextTransparency = 1
+    KeybindInfo.TextTransparency = 1
+    KeybindInfoFrame.Visible = true
     local t = TweenService:Create(KeybindInfoFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
-        Size=UDim2.new(0,170,0,h), Position=UDim2.new(1,-180,0.5,-h/2), BackgroundTransparency=0.3})
-    TweenService:Create(KbStroke, TweenInfo.new(0.3), {Transparency=0.3}):Play(); t:Play()
+        Size = UDim2.new(0, 170, 0, h), Position = UDim2.new(1, -180, 0.5, -h/2), BackgroundTransparency = 0.3
+    })
+    TweenService:Create(KeybindStroke, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Transparency = 0.3}):Play()
+    t:Play()
     t.Completed:Connect(function()
-        TweenService:Create(KbTitle, TweenInfo.new(0.2), {TextTransparency=0}):Play()
-        TweenService:Create(KbInfo, TweenInfo.new(0.2), {TextTransparency=0.2}):Play()
-        task.wait(0.2); KEYBIND_ANIM = false
+        TweenService:Create(KeybindTitle, TweenInfo.new(0.2), {TextTransparency = 0}):Play()
+        TweenService:Create(KeybindInfo, TweenInfo.new(0.2), {TextTransparency = 0.2}):Play()
+        task.wait(0.2)
+        KEYBIND_ANIM = false
     end)
 end
 
 local function HideKeybindInfo()
-    if KEYBIND_ANIM then return end; KEYBIND_ANIM = true
-    TweenService:Create(KbTitle, TweenInfo.new(0.15), {TextTransparency=1}):Play()
-    TweenService:Create(KbInfo, TweenInfo.new(0.15), {TextTransparency=1}):Play()
+    if KEYBIND_ANIM then return end
+    KEYBIND_ANIM = true
+    TweenService:Create(KeybindTitle, TweenInfo.new(0.15), {TextTransparency = 1}):Play()
+    TweenService:Create(KeybindInfo, TweenInfo.new(0.15), {TextTransparency = 1}):Play()
     task.wait(0.15)
     local h = KeybindInfoFrame.Size.Y.Offset
     local t = TweenService:Create(KeybindInfoFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
-        Size=UDim2.new(0,0,0,h), Position=UDim2.new(1,0,0.5,-h/2), BackgroundTransparency=1})
-    TweenService:Create(KbStroke, TweenInfo.new(0.25), {Transparency=1}):Play(); t:Play()
+        Size = UDim2.new(0, 0, 0, h), Position = UDim2.new(1, 0, 0.5, -h/2), BackgroundTransparency = 1
+    })
+    TweenService:Create(KeybindStroke, TweenInfo.new(0.25), {Transparency = 1}):Play()
+    t:Play()
     t.Completed:Connect(function()
-        KeybindInfoFrame.Visible = false; KeybindInfoFrame.BackgroundTransparency = 0.3
-        KbStroke.Transparency = 0.3; KEYBIND_ANIM = false
+        KeybindInfoFrame.Visible = false
+        KeybindInfoFrame.BackgroundTransparency = 0.3
+        KeybindStroke.Transparency = 0.3
+        KEYBIND_ANIM = false
     end)
 end
 
--- Loading UI
-local LoadingOverlay = Instance.new("Frame"); LoadingOverlay.Parent = MainFrame
-LoadingOverlay.BackgroundColor3 = Color3.fromRGB(8,8,8); LoadingOverlay.Size = UDim2.new(1,0,1,0)
-LoadingOverlay.ZIndex = 100; LoadingOverlay.BorderSizePixel = 0; LoadingOverlay.Visible = true
+-- ============================================
+-- LOADING UI
+-- ============================================
+local LoadingOverlay = Instance.new("Frame")
+LoadingOverlay.Parent = MainFrame
+LoadingOverlay.BackgroundColor3 = Color3.fromRGB(8, 8, 8)
+LoadingOverlay.Size = UDim2.new(1, 0, 1, 0)
+LoadingOverlay.ZIndex = 100
+LoadingOverlay.BorderSizePixel = 0
+LoadingOverlay.Visible = true
 
-local function MkLabel(parent, pos, sz, txt, ts, font, zi)
-    local l = Instance.new("TextLabel"); l.Parent = parent; l.BackgroundTransparency = 1
-    l.Position = pos; l.Size = sz; l.AnchorPoint = Vector2.new(0.5,0.5)
-    l.Font = font or Enum.Font.GothamBold; l.Text = txt
-    l.TextColor3 = Color3.fromRGB(255,255,255); l.TextSize = ts or 13
-    l.ZIndex = zi or 101; l.TextTransparency = 1; return l
+local function MakeLabel(parent, pos, size, text, textSize, font, zi)
+    local l = Instance.new("TextLabel")
+    l.Parent = parent
+    l.BackgroundTransparency = 1
+    l.Position = pos
+    l.Size = size
+    l.AnchorPoint = Vector2.new(0.5, 0.5)
+    l.Font = font or Enum.Font.GothamBold
+    l.Text = text
+    l.TextColor3 = Color3.fromRGB(255, 255, 255)
+    l.TextSize = textSize or 13
+    l.ZIndex = zi or 101
+    l.TextTransparency = 1
+    return l
 end
 
-local LoadingTitle    = MkLabel(LoadingOverlay, UDim2.new(0.5,0,0.28,0), UDim2.new(0.8,0,0,35), "KS-RIVALS HUB", 24, Enum.Font.GothamBlack)
-local LoadingSubtitle = MkLabel(LoadingOverlay, UDim2.new(0.5,0,0.38,0), UDim2.new(0.8,0,0,20), "MADE BY TEAM KS", 11)
-LoadingSubtitle.TextColor3 = Color3.fromRGB(100,100,100)
-local ProgressBarBg = Instance.new("Frame"); ProgressBarBg.Parent = LoadingOverlay
-ProgressBarBg.BackgroundColor3 = Color3.fromRGB(25,25,25); ProgressBarBg.Position = UDim2.new(0.5,0,0.52,0)
-ProgressBarBg.Size = UDim2.new(0.6,0,0,8); ProgressBarBg.AnchorPoint = Vector2.new(0.5,0.5)
-ProgressBarBg.BorderSizePixel = 0; ProgressBarBg.ZIndex = 101; ProgressBarBg.BackgroundTransparency = 1
-Instance.new("UICorner", ProgressBarBg).CornerRadius = UDim.new(0,4)
-local PBStroke = Instance.new("UIStroke"); PBStroke.Color = Color3.fromRGB(60,60,60)
-PBStroke.Thickness = 1; PBStroke.Transparency = 1; PBStroke.Parent = ProgressBarBg
-local ProgressBarFill = Instance.new("Frame"); ProgressBarFill.Parent = ProgressBarBg
-ProgressBarFill.BackgroundColor3 = Color3.fromRGB(255,255,255); ProgressBarFill.Size = UDim2.new(0,0,1,0)
-ProgressBarFill.BorderSizePixel = 0; ProgressBarFill.ZIndex = 102
-Instance.new("UICorner", ProgressBarFill).CornerRadius = UDim.new(0,4)
-local LoadingStatus = MkLabel(LoadingOverlay, UDim2.new(0.5,0,0.62,0), UDim2.new(0.8,0,0,22), "Initializing...", 13)
-LoadingStatus.TextColor3 = Color3.fromRGB(180,180,180)
-local LoadingPct = MkLabel(LoadingOverlay, UDim2.new(0.5,0,0.72,0), UDim2.new(0.8,0,0,18), "0%", 16, Enum.Font.GothamBlack)
+local LoadingTitle = MakeLabel(LoadingOverlay, UDim2.new(0.5,0,0.28,0), UDim2.new(0.8,0,0,35), "KS-RIVALS HUB", 24, Enum.Font.GothamBlack)
+local LoadingSubtitle = MakeLabel(LoadingOverlay, UDim2.new(0.5,0,0.38,0), UDim2.new(0.8,0,0,20), "MADE BY TEAM KS", 11)
+LoadingSubtitle.TextColor3 = Color3.fromRGB(100, 100, 100)
 
--- Content
-local ContentContainer = Instance.new("Frame"); ContentContainer.Parent = MainFrame
-ContentContainer.BackgroundTransparency = 1; ContentContainer.Size = UDim2.new(1,0,1,0)
-ContentContainer.Visible = false; ContentContainer.ZIndex = 1
+local ProgressBarBg = Instance.new("Frame")
+ProgressBarBg.Parent = LoadingOverlay
+ProgressBarBg.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+ProgressBarBg.Position = UDim2.new(0.5, 0, 0.52, 0)
+ProgressBarBg.Size = UDim2.new(0.6, 0, 0, 8)
+ProgressBarBg.AnchorPoint = Vector2.new(0.5, 0.5)
+ProgressBarBg.BorderSizePixel = 0
+ProgressBarBg.ZIndex = 101
+ProgressBarBg.BackgroundTransparency = 1
+Instance.new("UICorner", ProgressBarBg).CornerRadius = UDim.new(0, 4)
 
-local TopBar = Instance.new("Frame"); TopBar.Size = UDim2.new(1,0,0,25)
-TopBar.BackgroundTransparency = 1; TopBar.Parent = ContentContainer
-local TitleLabel = Instance.new("TextLabel"); TitleLabel.Text = "KS-Rivals HUB2 - Integrated"
-TitleLabel.Font = Enum.Font.Code; TitleLabel.TextColor3 = Color3.fromRGB(255,255,255); TitleLabel.TextSize = 13
-TitleLabel.Size = UDim2.new(1,-60,1,0); TitleLabel.Position = UDim2.new(0,10,0,0)
-TitleLabel.TextXAlignment = Enum.TextXAlignment.Left; TitleLabel.BackgroundTransparency = 1; TitleLabel.Parent = TopBar
-local CloseBtn = Instance.new("TextButton"); CloseBtn.Size = UDim2.new(0,25,0,25)
-CloseBtn.Position = UDim2.new(1,-25,0,0); CloseBtn.BackgroundTransparency = 1; CloseBtn.Text = "X"
-CloseBtn.TextColor3 = Color3.fromRGB(255,255,255); CloseBtn.Font = Enum.Font.Code
-CloseBtn.TextSize = 15; CloseBtn.Parent = TopBar
+local ProgressBarBgStroke = Instance.new("UIStroke")
+ProgressBarBgStroke.Color = Color3.fromRGB(60, 60, 60)
+ProgressBarBgStroke.Thickness = 1
+ProgressBarBgStroke.Transparency = 1
+ProgressBarBgStroke.Parent = ProgressBarBg
 
-local TabContainer = Instance.new("Frame"); TabContainer.Size = UDim2.new(1,0,0,30)
-TabContainer.Position = UDim2.new(0,0,0,25); TabContainer.BackgroundTransparency = 1; TabContainer.Parent = ContentContainer
+local ProgressBarFill = Instance.new("Frame")
+ProgressBarFill.Parent = ProgressBarBg
+ProgressBarFill.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+ProgressBarFill.Size = UDim2.new(0, 0, 1, 0)
+ProgressBarFill.BorderSizePixel = 0
+ProgressBarFill.ZIndex = 102
+Instance.new("UICorner", ProgressBarFill).CornerRadius = UDim.new(0, 4)
 
-local function MkTabBtn(name, pos)
-    local b = Instance.new("TextButton"); b.Text = "  "..name.."  "; b.Font = Enum.Font.Code
-    b.TextColor3 = Color3.fromRGB(150,150,150); b.TextSize = 14; b.BackgroundTransparency = 1
-    b.Size = UDim2.new(0,80,1,0); b.Position = pos; b.Parent = TabContainer; return b
+local LoadingStatusText = MakeLabel(LoadingOverlay, UDim2.new(0.5,0,0.62,0), UDim2.new(0.8,0,0,22), "Initializing...", 13)
+LoadingStatusText.TextColor3 = Color3.fromRGB(180, 180, 180)
+
+local LoadingPercent = MakeLabel(LoadingOverlay, UDim2.new(0.5,0,0.72,0), UDim2.new(0.8,0,0,18), "0%", 16, Enum.Font.GothamBlack)
+
+-- CONTENT CONTAINER
+local ContentContainer = Instance.new("Frame")
+ContentContainer.Parent = MainFrame
+ContentContainer.BackgroundTransparency = 1
+ContentContainer.Size = UDim2.new(1, 0, 1, 0)
+ContentContainer.Visible = false
+ContentContainer.ZIndex = 1
+
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 25)
+TopBar.BackgroundTransparency = 1
+TopBar.Parent = ContentContainer
+
+local Title = Instance.new("TextLabel")
+Title.Text = "KS-Rivals HUB2 - Integrated"
+Title.Font = Enum.Font.Code
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 13
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.BackgroundTransparency = 1
+Title.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 25, 0, 25)
+CloseBtn.Position = UDim2.new(1, -25, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.Font = Enum.Font.Code
+CloseBtn.TextSize = 15
+CloseBtn.Parent = TopBar
+
+local TabContainer = Instance.new("Frame")
+TabContainer.Size = UDim2.new(1, 0, 0, 30)
+TabContainer.Position = UDim2.new(0, 0, 0, 25)
+TabContainer.BackgroundTransparency = 1
+TabContainer.Parent = ContentContainer
+
+local function CreateTabBtn(name, pos)
+    local btn = Instance.new("TextButton")
+    btn.Text = "  " .. name .. "  "
+    btn.Font = Enum.Font.Code
+    btn.TextColor3 = Color3.fromRGB(150, 150, 150)
+    btn.TextSize = 14
+    btn.BackgroundTransparency = 1
+    btn.Size = UDim2.new(0, 80, 1, 0)
+    btn.Position = pos
+    btn.Parent = TabContainer
+    return btn
 end
-local AimTab    = MkTabBtn("main",    UDim2.new(0,0,0,0))
-local VisualTab = MkTabBtn("visuals", UDim2.new(0,85,0,0))
 
-local Content = Instance.new("Frame"); Content.Size = UDim2.new(1,-20,1,-65)
-Content.Position = UDim2.new(0,10,0,55); Content.BackgroundTransparency = 1; Content.Parent = ContentContainer
-local AimPage = Instance.new("Frame"); AimPage.Size = UDim2.new(1,0,1,0)
-AimPage.BackgroundTransparency = 1; AimPage.Visible = true; AimPage.Parent = Content
-local VisualPage = Instance.new("Frame"); VisualPage.Size = UDim2.new(1,0,1,0)
-VisualPage.BackgroundTransparency = 1; VisualPage.Visible = false; VisualPage.Parent = Content
-Instance.new("UIListLayout", AimPage).Padding   = UDim.new(0,4)
-Instance.new("UIListLayout", VisualPage).Padding = UDim.new(0,4)
+local AimTab = CreateTabBtn("main", UDim2.new(0, 0, 0, 0))
+local VisualTab = CreateTabBtn("visuals", UDim2.new(0, 85, 0, 0))
 
-local ToggleCheckInners = {}
+local Content = Instance.new("Frame")
+Content.Size = UDim2.new(1, -20, 1, -65)
+Content.Position = UDim2.new(0, 10, 0, 55)
+Content.BackgroundTransparency = 1
+Content.Parent = ContentContainer
+
+local AimPage = Instance.new("Frame")
+AimPage.Size = UDim2.new(1, 0, 1, 0)
+AimPage.BackgroundTransparency = 1
+AimPage.Visible = true
+AimPage.Parent = Content
+
+local VisualPage = Instance.new("Frame")
+VisualPage.Size = UDim2.new(1, 0, 1, 0)
+VisualPage.BackgroundTransparency = 1
+VisualPage.Visible = false
+VisualPage.Parent = Content
+
+local AimList = Instance.new("UIListLayout")
+AimList.Padding = UDim.new(0, 4)
+AimList.Parent = AimPage
+
+local VisualList = Instance.new("UIListLayout")
+VisualList.Padding = UDim.new(0, 4)
+VisualList.Parent = VisualPage
+
+-- ============================================
+-- HELPERS
+-- ============================================
 local function IsToggleCheckInner(e)
     for _, v in ipairs(ToggleCheckInners) do if e == v then return true end end
     return false
@@ -511,90 +626,153 @@ end
 
 local function ShowTab(t)
     if t == "Aim" then
-        AimPage.Visible=true; VisualPage.Visible=false
-        AimTab.TextColor3=Color3.fromRGB(255,255,255); VisualTab.TextColor3=Color3.fromRGB(130,130,130)
+        AimPage.Visible = true; VisualPage.Visible = false
+        AimTab.TextColor3 = Color3.fromRGB(255,255,255)
+        VisualTab.TextColor3 = Color3.fromRGB(130,130,130)
     else
-        AimPage.Visible=false; VisualPage.Visible=true
-        AimTab.TextColor3=Color3.fromRGB(130,130,130); VisualTab.TextColor3=Color3.fromRGB(255,255,255)
+        AimPage.Visible = false; VisualPage.Visible = true
+        AimTab.TextColor3 = Color3.fromRGB(130,130,130)
+        VisualTab.TextColor3 = Color3.fromRGB(255,255,255)
     end
 end
+
 AimTab.MouseButton1Click:Connect(function() ShowTab("Aim") end)
 VisualTab.MouseButton1Click:Connect(function() ShowTab("Visual") end)
 
--- Hub Animation
-local HUB_ANIMATION_PLAYING = false
-local LOADING_COMPLETE = false
-
+-- ============================================
+-- HUB ANIMATION
+-- ============================================
 local function FadeContentIn()
-    for _, c in ipairs(ContentContainer:GetDescendants()) do
-        if IsToggleCheckInner(c) then continue end
-        if c:IsA("TextLabel") or c:IsA("TextButton") then
-            c.TextTransparency = 1
-            TweenService:Create(c, TweenInfo.new(0.2), {TextTransparency=0}):Play()
+    for _, child in ipairs(ContentContainer:GetDescendants()) do
+        if IsToggleCheckInner(child) then continue end
+        if child:IsA("TextLabel") or child:IsA("TextButton") then
+            child.TextTransparency = 1
+            TweenService:Create(child, TweenInfo.new(0.2), {TextTransparency = 0}):Play()
         end
-        if c:IsA("Frame") and c.BackgroundTransparency < 1 then
-            local orig = c.BackgroundTransparency; c.BackgroundTransparency = 1
-            TweenService:Create(c, TweenInfo.new(0.2), {BackgroundTransparency=orig}):Play()
+        if child:IsA("Frame") and child.BackgroundTransparency < 1 then
+            local orig = child.BackgroundTransparency
+            child.BackgroundTransparency = 1
+            TweenService:Create(child, TweenInfo.new(0.2), {BackgroundTransparency = orig}):Play()
         end
     end
 end
 
 local function AnimateHubOpen()
-    if HUB_ANIMATION_PLAYING then return end; HUB_ANIMATION_PLAYING = true
+    if HUB_ANIMATION_PLAYING then return end
+    HUB_ANIMATION_PLAYING = true
     HideKeybindInfo()
-    MainFrame.Size=UDim2.new(0,480,0,0); MainFrame.Position=UDim2.new(0.5,-240,0.5,0)
-    MainFrame.BackgroundTransparency=1; MainStroke.Transparency=1
-    ContentContainer.Visible=false; MainFrame.Visible=true
-    local t = TweenService:Create(MainFrame, TweenInfo.new(0.25,Enum.EasingStyle.Quart,Enum.EasingDirection.Out), {
-        Size=UDim2.new(0,480,0,320), Position=UDim2.new(0.5,-240,0.5,-160), BackgroundTransparency=0})
-    TweenService:Create(MainStroke, TweenInfo.new(0.25), {Transparency=0}):Play(); t:Play()
-    t.Completed:Connect(function() ContentContainer.Visible=true; FadeContentIn(); task.wait(0.2); HUB_ANIMATION_PLAYING=false end)
-end
-
-local function AnimateHubClose(cb)
-    if HUB_ANIMATION_PLAYING then return end; HUB_ANIMATION_PLAYING = true
-    for _, c in ipairs(ContentContainer:GetDescendants()) do
-        if IsToggleCheckInner(c) then continue end
-        if c:IsA("TextLabel") or c:IsA("TextButton") then TweenService:Create(c, TweenInfo.new(0.15), {TextTransparency=1}):Play() end
-        if c:IsA("Frame") and c.BackgroundTransparency < 1 then TweenService:Create(c, TweenInfo.new(0.15), {BackgroundTransparency=1}):Play() end
-    end
-    task.wait(0.15); ContentContainer.Visible = false
-    local t = TweenService:Create(MainFrame, TweenInfo.new(0.2,Enum.EasingStyle.Quart,Enum.EasingDirection.In), {
-        Size=UDim2.new(0,480,0,0), Position=UDim2.new(0.5,-240,0.5,0), BackgroundTransparency=1})
-    TweenService:Create(MainStroke, TweenInfo.new(0.2), {Transparency=1}):Play(); t:Play()
+    MainFrame.Size = UDim2.new(0, 480, 0, 0)
+    MainFrame.Position = UDim2.new(0.5, -240, 0.5, 0)
+    MainFrame.BackgroundTransparency = 1
+    MainStroke.Transparency = 1
+    ContentContainer.Visible = false
+    MainFrame.Visible = true
+    local t = TweenService:Create(MainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 480, 0, 320), Position = UDim2.new(0.5, -240, 0.5, -160), BackgroundTransparency = 0
+    })
+    TweenService:Create(MainStroke, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Transparency = 0}):Play()
+    t:Play()
     t.Completed:Connect(function()
-        MainFrame.Visible=false; MainFrame.Size=UDim2.new(0,480,0,320)
-        MainFrame.Position=UDim2.new(0.5,-240,0.5,-160); MainFrame.BackgroundTransparency=0
-        MainStroke.Transparency=0; HUB_ANIMATION_PLAYING=false; ShowKeybindInfo()
-        if cb then cb() end
+        ContentContainer.Visible = true
+        FadeContentIn()
+        task.wait(0.2)
+        HUB_ANIMATION_PLAYING = false
     end)
 end
 
-local function UpdateProgress(pct, status)
-    LoadingPct.Text = math.floor(pct).."%"
-    if status then LoadingStatus.Text = status end
-    TweenService:Create(ProgressBarFill, TweenInfo.new(0.3), {Size=UDim2.new(pct/100,0,1,0)}):Play()
+local function AnimateHubClose(callback)
+    if HUB_ANIMATION_PLAYING then return end
+    HUB_ANIMATION_PLAYING = true
+    for _, child in ipairs(ContentContainer:GetDescendants()) do
+        if IsToggleCheckInner(child) then continue end
+        if child:IsA("TextLabel") or child:IsA("TextButton") then
+            TweenService:Create(child, TweenInfo.new(0.15), {TextTransparency = 1}):Play()
+        end
+        if child:IsA("Frame") and child.BackgroundTransparency < 1 then
+            TweenService:Create(child, TweenInfo.new(0.15), {BackgroundTransparency = 1}):Play()
+        end
+    end
+    task.wait(0.15)
+    ContentContainer.Visible = false
+    local t = TweenService:Create(MainFrame, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
+        Size = UDim2.new(0, 480, 0, 0), Position = UDim2.new(0.5, -240, 0.5, 0), BackgroundTransparency = 1
+    })
+    TweenService:Create(MainStroke, TweenInfo.new(0.2), {Transparency = 1}):Play()
+    t:Play()
+    t.Completed:Connect(function()
+        MainFrame.Visible = false
+        MainFrame.Size = UDim2.new(0, 480, 0, 320)
+        MainFrame.Position = UDim2.new(0.5, -240, 0.5, -160)
+        MainFrame.BackgroundTransparency = 0
+        MainStroke.Transparency = 0
+        HUB_ANIMATION_PLAYING = false
+        ShowKeybindInfo()
+        if callback then callback() end
+    end)
+end
+
+local function UpdateLoadingProgress(pct, status)
+    LoadingPercent.Text = math.floor(pct) .. "%"
+    if status then LoadingStatusText.Text = status end
+    TweenService:Create(ProgressBarFill, TweenInfo.new(0.3), {Size = UDim2.new(pct/100, 0, 1, 0)}):Play()
+end
+
+local function StartLoadingAnimation()
+    MainFrame.Size = UDim2.new(0, 480, 0, 320)
+    MainFrame.Position = UDim2.new(0.5, -240, 0.5, -160)
+    MainFrame.BackgroundTransparency = 1
+    MainStroke.Transparency = 1
+    LoadingOverlay.Visible = true
+    ContentContainer.Visible = false
+    MainFrame.Visible = true
+    TweenService:Create(MainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundTransparency = 0}):Play()
+    TweenService:Create(MainStroke, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Transparency = 0}):Play()
+    task.wait(0.2)
+    TweenService:Create(LoadingTitle, TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+    task.wait(0.1)
+    TweenService:Create(LoadingSubtitle, TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+    task.wait(0.1)
+    TweenService:Create(ProgressBarBg, TweenInfo.new(0.3), {BackgroundTransparency = 0}):Play()
+    TweenService:Create(ProgressBarBgStroke, TweenInfo.new(0.3), {Transparency = 0}):Play()
+    TweenService:Create(LoadingStatusText, TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+    TweenService:Create(LoadingPercent, TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+end
+
+local function EndLoadingAnimation(callback)
+    LoadingStatusText.Text = "Loading Complete!"
+    LoadingStatusText.TextColor3 = Color3.fromRGB(100, 255, 100)
+    task.wait(0.6)
+    for _, v in ipairs({LoadingTitle, LoadingSubtitle, ProgressBarBg, ProgressBarBgStroke, ProgressBarFill, LoadingStatusText, LoadingPercent}) do
+        local prop = v:IsA("UIStroke") and "Transparency" or (v:IsA("Frame") and "BackgroundTransparency" or "TextTransparency")
+        TweenService:Create(v, TweenInfo.new(0.3), {[prop] = 1}):Play()
+    end
+    task.wait(0.4)
+    LoadingOverlay.Visible = false
+    ContentContainer.Visible = true
+    FadeContentIn()
+    task.wait(0.3)
+    LOADING_COMPLETE = true
+    if callback then callback() end
 end
 
 -- ============================================
--- FEATURE MODULES
+-- NO RECOIL
+-- [FIX] 모든 require를 SafeRequire로 교체
 -- ============================================
-
--- No Recoil
 local nrGunModule, nrItemLibrary = nil, nil
-local nrOriginalRecoil, nrOriginalStart, nrOriginalTracers = nil, nil, nil
+local nrOriginalRecoil, nrOriginalStartShooting, nrOriginal_LocalTracers = nil, nil, nil
 
 local function initNoRecoilModules()
-    task.spawn(function()
-        local PS = SafeWait(LocalPlayer, "PlayerScripts", 5)
-        if not PS then return end
-        for _, m in pairs(PS:GetDescendants()) do
-            if m:IsA("ModuleScript") and m.Name == "Gun" then
-                nrGunModule = SafeRequire(m)
+    task.spawn(function()  -- [FIX] task.spawn으로 비동기 처리
+        local PlayerScripts = SafeWait(LocalPlayer, "PlayerScripts", 5)
+        if not PlayerScripts then return end
+        for _, module in pairs(PlayerScripts:GetDescendants()) do
+            if module:IsA("ModuleScript") and module.Name == "Gun" then
+                nrGunModule = SafeRequire(module)
                 if nrGunModule then
-                    nrOriginalRecoil  = nrGunModule._Recoil
-                    nrOriginalStart   = nrGunModule.StartShooting
-                    nrOriginalTracers = nrGunModule._LocalTracers
+                    nrOriginalRecoil = nrGunModule._Recoil
+                    nrOriginalStartShooting = nrGunModule.StartShooting
+                    nrOriginal_LocalTracers = nrGunModule._LocalTracers
                 end
                 break
             end
@@ -608,17 +786,22 @@ local function initNoRecoilModules()
 end
 
 local function enableNoRecoil()
-    if not nrGunModule then createNotification("NoRecoil: Module not ready"); return end
+    if not nrGunModule then
+        createNotification("NoRecoil: Module not ready")
+        return
+    end
     pcall(function()
         nrGunModule._Recoil = function() end
         nrGunModule.StartShooting = function(self, a2, a3)
-            local ok, e, cd, ia, x1, x2 = nrOriginalStart(self, a2, a3)
+            local ok, e, cd, ia, x1, x2 = nrOriginalStartShooting(self, a2, a3)
             return ok, e, cd, true, x1, x2
         end
-        nrGunModule._LocalTracers = function(self, _, a3) return nrOriginalTracers(self, true, a3) end
+        nrGunModule._LocalTracers = function(self, _, a3)
+            return nrOriginal_LocalTracers(self, true, a3)
+        end
         if nrItemLibrary and nrItemLibrary.Items then
             for _, wd in pairs(nrItemLibrary.Items) do
-                if wd.Type == "Gun" then wd.ShootRecoil=0; wd.AimSpreadMultiplier=0 end
+                if wd.Type == "Gun" then wd.ShootRecoil = 0 wd.AimSpreadMultiplier = 0 end
             end
         end
     end)
@@ -628,25 +811,30 @@ end
 local function disableNoRecoil()
     if nrGunModule and nrOriginalRecoil then
         pcall(function()
-            nrGunModule._Recoil        = nrOriginalRecoil
-            nrGunModule.StartShooting  = nrOriginalStart
-            nrGunModule._LocalTracers  = nrOriginalTracers
+            nrGunModule._Recoil = nrOriginalRecoil
+            nrGunModule.StartShooting = nrOriginalStartShooting
+            nrGunModule._LocalTracers = nrOriginal_LocalTracers
         end)
     end
     createNotification("No Recoil Disabled")
 end
 
--- Third Person
-local thirdPersonConn = nil
-local thirdPersonWheelConn = nil
-local tpDistance = 12
+-- ============================================
+-- THIRD PERSON
+-- ============================================
+local thirdPersonConnection = nil
+local thirdPersonWheelConnection = nil
+local distance = 12
+local heightOffset = 2.5
+local sideOffset = 0
 
 local function updateThirdPersonCamera()
     local char = LocalPlayer.Character
     if char and char:FindFirstChild("HumanoidRootPart") then
         local root = char.HumanoidRootPart
-        local rot  = Camera.CFrame.Rotation
-        Camera.CFrame = rot + (root.Position + Vector3.new(0,2.5,0) + rot * Vector3.new(0,0,tpDistance))
+        local rot = Camera.CFrame.Rotation
+        local tgt = root.Position + Vector3.new(0, heightOffset, 0)
+        Camera.CFrame = rot + (tgt + rot * Vector3.new(sideOffset, 0, distance))
         for _, p in pairs(char:GetChildren()) do
             if p:IsA("BasePart") then p.LocalTransparencyModifier = 0 end
         end
@@ -654,14 +842,14 @@ local function updateThirdPersonCamera()
 end
 
 local function enableThirdPerson()
-    if thirdPersonConn then thirdPersonConn:Disconnect() end
-    if thirdPersonWheelConn then thirdPersonWheelConn:Disconnect() end
+    if thirdPersonConnection then thirdPersonConnection:Disconnect() end
+    if thirdPersonWheelConnection then thirdPersonWheelConnection:Disconnect() end
     RunService:UnbindFromRenderStep("ThirdPersonCamera")
-    RunService:BindToRenderStep("ThirdPersonCamera", Enum.RenderPriority.Camera.Value+1, updateThirdPersonCamera)
-    thirdPersonConn = true
-    thirdPersonWheelConn = UserInputService.InputChanged:Connect(function(input)
+    RunService:BindToRenderStep("ThirdPersonCamera", Enum.RenderPriority.Camera.Value + 1, updateThirdPersonCamera)
+    thirdPersonConnection = true
+    thirdPersonWheelConnection = UserInputService.InputChanged:Connect(function(input)
         if THIRD_PERSON_ENABLED and input.UserInputType == Enum.UserInputType.MouseWheel then
-            tpDistance = math.clamp(tpDistance - input.Position.Z * 1.5, 3, 30)
+            distance = math.clamp(distance - (input.Position.Z * 1.5), 3, 30)
         end
     end)
     createNotification("Third Person Enabled")
@@ -669,30 +857,40 @@ end
 
 local function disableThirdPerson()
     RunService:UnbindFromRenderStep("ThirdPersonCamera")
-    thirdPersonConn = nil
-    if thirdPersonWheelConn then thirdPersonWheelConn:Disconnect(); thirdPersonWheelConn = nil end
-    Camera.CameraType = Enum.CameraType.Custom; tpDistance = 12
+    thirdPersonConnection = nil
+    if thirdPersonWheelConnection then thirdPersonWheelConnection:Disconnect() thirdPersonWheelConnection = nil end
+    Camera.CameraType = Enum.CameraType.Custom
+    distance = 12
     createNotification("Third Person Disabled")
 end
 
--- No Cool Time
-local weaponDataCache  = nil
-local lastCooldownTime = 0
+-- ============================================
+-- NO COOL TIME
+-- [FIX] WaitForChild 타임아웃 추가 + SafeRequire 사용
+-- ============================================
+local weaponDataCache = nil
+local lastCooldownRemoval = 0
+local noCoolTimeApplied = false
 
 local function removeCooldowns()
-    task.spawn(function()
-        if tick() - lastCooldownTime < 10 then return end
-        pcall(function()
+    local now = tick()
+    if now - lastCooldownRemoval < 10 then return end
+    task.spawn(function()  -- [FIX] 비동기 처리
+        local ok, result = pcall(function()
             if not weaponDataCache then
                 local mods = ReplicatedStorage:FindFirstChild("Modules")
-                if not mods then return end
-                for _, n in ipairs({"ItemLibrary","WeaponStats","Items","WeaponData","Weapons"}) do
-                    local m = mods:FindFirstChild(n)
-                    if m then weaponDataCache = SafeRequire(m); break end
+                if not mods then return false end
+                local names = {"ItemLibrary","WeaponStats","Items","WeaponData","Weapons"}
+                local wm = nil
+                for _, n in ipairs(names) do
+                    wm = mods:FindFirstChild(n)
+                    if wm then break end
                 end
-                if not weaponDataCache then return end
+                if not wm then return false end
+                weaponDataCache = SafeRequire(wm)
+                if not weaponDataCache then return false end
             end
-            if not weaponDataCache.Items then return end
+            if not weaponDataCache.Items then return false end
             for _, s in pairs(weaponDataCache.Items) do
                 for _, k in ipairs({"ShootCooldown","ShootBurstCooldown","AttackCooldown","HeavyAttackCooldown",
                     "Cooldown","DeflectCooldown","DashCooldown","BuildCooldown","SpinCooldown",
@@ -701,19 +899,29 @@ local function removeCooldowns()
                 end
                 if s.ReloadTime then s.ReloadTime = 0.01 end
             end
+            return true
         end)
-        lastCooldownTime = tick()
+        if ok and result then
+            noCoolTimeApplied = true
+            lastCooldownRemoval = now
+        end
     end)
 end
 
--- Rage Bot
+-- ============================================
+-- RAGE BOT
+-- ============================================
 local rbEnabled = false
-local rbTarget, rbConnection = nil, nil
+local rbTarget = nil
+local rbConnection = nil
 local rbChar, rbHrp, rbHum = nil, nil, nil
 
-local function rbUpdateRefs()
+local function rbUpdateCharacterRefs()
     rbChar = LocalPlayer.Character
-    if rbChar then rbHrp = rbChar:FindFirstChild("HumanoidRootPart"); rbHum = rbChar:FindFirstChild("Humanoid") end
+    if rbChar then
+        rbHrp = rbChar:FindFirstChild("HumanoidRootPart")
+        rbHum = rbChar:FindFirstChild("Humanoid")
+    end
 end
 
 local function rbFindNearest()
@@ -725,22 +933,23 @@ local function rbFindNearest()
             local hm = p.Character:FindFirstChild("Humanoid")
             if h and hm and hm.Health > 0 then
                 local d = (rbHrp.Position - h.Position).Magnitude
-                if d < minD then minD=d; nearest=p end
+                if d < minD then minD = d; nearest = p end
             end
         end
     end
     return nearest
 end
 
-local function rbLoop()
+local function rbMainLoop()
     if not rbEnabled then return end
     rbTarget = rbFindNearest()
     if rbTarget and rbTarget.Character and rbHrp then
         local th = rbTarget.Character:FindFirstChild("HumanoidRootPart")
         local thm = rbTarget.Character:FindFirstChild("Humanoid")
         if th and thm and thm.Health > 0 then
-            rbHrp.CFrame = CFrame.new(th.Position + Vector3.new(math.random(-8,8), math.random(6,12), math.random(-8,8)))
-            local t = tick()*25
+            local tp = th.Position + Vector3.new(math.random(-8,8), math.random(6,12), math.random(-8,8))
+            rbHrp.CFrame = CFrame.new(tp)
+            local t = tick() * 25
             rbHrp.CFrame = rbHrp.CFrame * CFrame.Angles(math.rad(math.sin(t*3.7)*360), math.rad(math.cos(t*4.3)*360), math.rad(math.sin(t*5.1)*360))
             rbHrp.Velocity = Vector3.new(math.random(-50,50), math.random(-50,50), math.random(-50,50))
         end
@@ -748,16 +957,27 @@ local function rbLoop()
 end
 
 LocalPlayer.CharacterAdded:Connect(function()
-    if rbEnabled then rbEnabled=false; if rbConnection then rbConnection:Disconnect(); rbConnection=nil end end
-    rbUpdateRefs()
+    if rbEnabled then rbEnabled = false; if rbConnection then rbConnection:Disconnect() rbConnection = nil end end
+    rbUpdateCharacterRefs()
 end)
 
--- Full Auto
-local faTarget, faSpinConn, faClickConn, faCamConn = nil, nil, nil, nil
-local faGravConn, faLoopActive = nil, false
-local faIsAbove, faIsFirstTP, faAutoClickPaused = false, true, false
-local faIsRetreating, faRetreatLock = false, false
-local faLastHealth, faLastRetreatTime = 100, 0
+-- ============================================
+-- FULL AUTO
+-- ============================================
+local faTargetPlayer = nil
+local faIsAbove = false
+local faLastHealth = 100
+local faSpinConnection = nil
+local faAutoClickConnection = nil
+local faCameraConnection = nil
+local faIsFirstTeleport = true
+local faLoopActive = false
+local faLastAutoClickTime = 0
+local faAutoClickPaused = false
+local faGravityConnection = nil
+local faLastRetreatTime = 0
+local faIsRetreating = false
+local faRetreatLock = false
 
 local function faFindClosest()
     local char = LocalPlayer.Character
@@ -769,7 +989,7 @@ local function faFindClosest()
             local r = p.Character:FindFirstChild("HumanoidRootPart")
             if r then
                 local d = (myPos - r.Position).Magnitude
-                if d < minD then minD=d; closest=p end
+                if d < minD then minD = d; closest = p end
             end
         end
     end
@@ -783,41 +1003,63 @@ local function faPressR()
 end
 
 local function faDisableGravity()
-    if faGravConn then faGravConn:Disconnect() end
-    faGravConn = RunService.RenderStepped:Connect(function()
-        if not FULL_AUTO_ENABLED then if faGravConn then faGravConn:Disconnect(); faGravConn=nil end; return end
-        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if faGravityConnection then faGravityConnection:Disconnect() end
+    faGravityConnection = RunService.RenderStepped:Connect(function()
+        if not FULL_AUTO_ENABLED then
+            if faGravityConnection then faGravityConnection:Disconnect() faGravityConnection = nil end
+            return
+        end
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
         if root and not root:FindFirstChild("FA_NoGravity") then
-            local bv = Instance.new("BodyVelocity"); bv.Name="FA_NoGravity"
-            bv.MaxForce=Vector3.new(0,math.huge,0); bv.Velocity=Vector3.zero; bv.Parent=root
+            local bv = Instance.new("BodyVelocity")
+            bv.Name = "FA_NoGravity"
+            bv.MaxForce = Vector3.new(0, math.huge, 0)
+            bv.Velocity = Vector3.zero
+            bv.Parent = root
         end
     end)
 end
 
 local function faEnableGravity()
-    if faGravConn then faGravConn:Disconnect(); faGravConn=nil end
-    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if root then local bv=root:FindFirstChild("FA_NoGravity"); if bv then bv:Destroy() end end
+    if faGravityConnection then faGravityConnection:Disconnect() faGravityConnection = nil end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root then
+        local bv = root:FindFirstChild("FA_NoGravity")
+        if bv then bv:Destroy() end
+    end
 end
 
-local function faStartSpin()
-    if faSpinConn then faSpinConn:Disconnect() end
-    faSpinConn = RunService.RenderStepped:Connect(function()
-        if not FULL_AUTO_ENABLED then if faSpinConn then faSpinConn:Disconnect(); faSpinConn=nil end; return end
+local function faStartSpinning()
+    if faSpinConnection then faSpinConnection:Disconnect() end
+    faSpinConnection = RunService.RenderStepped:Connect(function()
+        if not FULL_AUTO_ENABLED then
+            if faSpinConnection then faSpinConnection:Disconnect() faSpinConnection = nil end
+            return
+        end
         if faIsRetreating then return end
-        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        if root then root.CFrame = root.CFrame * CFrame.Angles(math.rad(math.random(-30,30)), math.rad(math.random(0,360)), math.rad(math.random(-30,30))) end
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then
+            root.CFrame = root.CFrame * CFrame.Angles(math.rad(math.random(-30,30)), math.rad(math.random(0,360)), math.rad(math.random(-30,30)))
+        end
     end)
 end
 
-local function faStartCamLock()
-    if faCamConn then faCamConn:Disconnect() end
-    faCamConn = RunService.RenderStepped:Connect(function()
-        if not FULL_AUTO_ENABLED then Camera.CameraType=Enum.CameraType.Custom; if faCamConn then faCamConn:Disconnect(); faCamConn=nil end; return end
+local function faStartCameraLock()
+    if faCameraConnection then faCameraConnection:Disconnect() end
+    faCameraConnection = RunService.RenderStepped:Connect(function()
+        if not FULL_AUTO_ENABLED then
+            Camera.CameraType = Enum.CameraType.Custom
+            if faCameraConnection then faCameraConnection:Disconnect() faCameraConnection = nil end
+            return
+        end
         if faIsRetreating then return end
-        local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        if faTarget and faTarget.Character and myRoot then
-            local head = faTarget.Character:FindFirstChild("Head")
+        local char = LocalPlayer.Character
+        local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+        if faTargetPlayer and faTargetPlayer.Character and myRoot then
+            local head = faTargetPlayer.Character:FindFirstChild("Head")
             if head then
                 Camera.CameraType = Enum.CameraType.Scriptable
                 Camera.CFrame = CFrame.new(myRoot.Position + Vector3.new(0,5,0), head.Position)
@@ -827,46 +1069,55 @@ local function faStartCamLock()
 end
 
 local function faInRange()
-    if not faTarget or not faTarget.Character then return false end
-    local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    local tRoot  = faTarget.Character:FindFirstChild("HumanoidRootPart")
+    if not faTargetPlayer or not faTargetPlayer.Character then return false end
+    local char = LocalPlayer.Character
+    local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+    local tRoot = faTargetPlayer.Character:FindFirstChild("HumanoidRootPart")
     if not myRoot or not tRoot then return false end
     local d = (myRoot.Position - tRoot.Position).Magnitude
     return d <= 30 and math.abs(myRoot.Position.Y - tRoot.Position.Y) <= 25
 end
 
-local function faStartClick()
-    if faClickConn then faClickConn:Disconnect() end
-    faClickConn = RunService.RenderStepped:Connect(function()
-        if not FULL_AUTO_ENABLED then if faClickConn then faClickConn:Disconnect(); faClickConn=nil end; return end
-        if faAutoClickPaused or faIsRetreating or MainFrame.Visible or not faInRange() then return end
+local function faStartAutoClick()
+    if faAutoClickConnection then faAutoClickConnection:Disconnect() end
+    faAutoClickConnection = RunService.RenderStepped:Connect(function()
+        if not FULL_AUTO_ENABLED then
+            if faAutoClickConnection then faAutoClickConnection:Disconnect() faAutoClickConnection = nil end
+            return
+        end
+        if faAutoClickPaused or faIsRetreating or MainFrame.Visible then return end
+        if not faInRange() then return end
         local now = tick()
-        if now - (faClickConn and 0 or 0) >= 0.02 then pcall(mouse1click) end
+        if now - faLastAutoClickTime >= 0.02 then
+            faLastAutoClickTime = now
+            pcall(mouse1click)
+        end
     end)
 end
 
-local faLastClickT = 0
-local function faStartClickFixed()
-    if faClickConn then faClickConn:Disconnect() end
-    faClickConn = RunService.RenderStepped:Connect(function()
-        if not FULL_AUTO_ENABLED then if faClickConn then faClickConn:Disconnect(); faClickConn=nil end; return end
-        if faAutoClickPaused or faIsRetreating or MainFrame.Visible or not faInRange() then return end
-        local now = tick()
-        if now - faLastClickT >= 0.02 then faLastClickT=now; pcall(mouse1click) end
-    end)
-end
-
-local function faRetreat(tRoot)
+local function faPerformRetreat(targetRoot)
     if faRetreatLock then return end
-    faRetreatLock=true; faIsRetreating=true; faAutoClickPaused=true
-    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if not root or not tRoot then faIsRetreating=false; faAutoClickPaused=false; faRetreatLock=false; return end
+    faRetreatLock = true
+    faIsRetreating = true
+    faAutoClickPaused = true
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root or not targetRoot then
+        faIsRetreating = false; faAutoClickPaused = false; faRetreatLock = false
+        return
+    end
     Camera.CameraType = Enum.CameraType.Custom
-    root.CFrame = CFrame.new(tRoot.Position + Vector3.new(0,10000,0))
-    task.wait(0.2); faPressR(); task.wait(2)
-    faAutoClickPaused=false; faIsRetreating=false; faLastRetreatTime=tick(); faIsAbove=false; faRetreatLock=false
-    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
-    if hum then faLastHealth = hum.Health end
+    root.CFrame = CFrame.new(targetRoot.Position + Vector3.new(0, 10000, 0))
+    task.wait(0.2)
+    faPressR()
+    task.wait(2)
+    faAutoClickPaused = false
+    faIsRetreating = false
+    faLastRetreatTime = tick()
+    faIsAbove = false
+    faRetreatLock = false
+    local newHum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+    if newHum then faLastHealth = newHum.Health end
 end
 
 local function faMainLoop()
@@ -874,32 +1125,34 @@ local function faMainLoop()
     while FULL_AUTO_ENABLED do
         task.wait(0.1)
         if not FULL_AUTO_ENABLED then break end
-        if not faTarget or not faTarget.Character then
-            faTarget = faFindClosest()
-            if not faTarget then task.wait(0.5); continue end
-            local th = faTarget.Character:FindFirstChild("Humanoid")
+        if not faTargetPlayer or not faTargetPlayer.Character then
+            faTargetPlayer = faFindClosest()
+            if not faTargetPlayer then task.wait(0.5); continue end
+            local th = faTargetPlayer.Character:FindFirstChild("Humanoid")
             if th then faLastHealth = th.Health end
         end
         local char = LocalPlayer.Character
-        local hum  = char and char:FindFirstChild("Humanoid")
+        local hum = char and char:FindFirstChild("Humanoid")
         local root = char and char:FindFirstChild("HumanoidRootPart")
         if not char or not hum or not root then task.wait(0.5); continue end
-        local tChar = faTarget.Character
+        local tChar = faTargetPlayer.Character
         local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
-        local tHum  = tChar and tChar:FindFirstChild("Humanoid")
-        if not tRoot or not tHum then faTarget=nil; task.wait(0.5); continue end
+        local tHum = tChar and tChar:FindFirstChild("Humanoid")
+        if not tRoot or not tHum then faTargetPlayer = nil; task.wait(0.5); continue end
         local curHP = hum.Health
+        local now = tick()
         if not faRetreatLock then
             if curHP < faLastHealth and faLastHealth > 0 then
-                faRetreat(tRoot)
-            elseif not faIsRetreating and (tick() - faLastRetreatTime >= 2.5) then
-                faRetreat(tRoot)
+                faPerformRetreat(tRoot)
+            elseif not faIsRetreating and (now - faLastRetreatTime >= 2.5) then
+                faPerformRetreat(tRoot)
             elseif not faIsAbove and not faIsRetreating then
-                root.CFrame = CFrame.new(tRoot.Position + Vector3.new(0,10000,0))
-                task.wait(math.random(10,20)/10); faIsAbove=true
+                root.CFrame = CFrame.new(tRoot.Position + Vector3.new(0, 10000, 0))
+                task.wait(math.random(10,20)/10)
+                faIsAbove = true
             elseif not faIsRetreating then
-                root.CFrame = CFrame.new(tRoot.Position + Vector3.new(0,15,0))
-                if faIsFirstTP then task.wait(2); faIsFirstTP=false end
+                root.CFrame = CFrame.new(tRoot.Position + Vector3.new(0, 15, 0))
+                if faIsFirstTeleport then task.wait(2); faIsFirstTeleport = false end
                 faLastHealth = curHP
             end
         end
@@ -909,145 +1162,182 @@ end
 
 local function faStart()
     local char = LocalPlayer.Character
-    local hum  = char and char:FindFirstChild("Humanoid")
-    faLastHealth=hum and hum.Health or 100; faIsFirstTP=true; faTarget=nil
-    faAutoClickPaused=false; faIsRetreating=false; faRetreatLock=false; faLastRetreatTime=tick()
-    faDisableGravity(); faStartSpin(); faStartCamLock(); faStartClickFixed()
+    local hum = char and char:FindFirstChild("Humanoid")
+    faLastHealth = hum and hum.Health or 100
+    faIsFirstTeleport = true
+    faTargetPlayer = nil
+    faAutoClickPaused = false
+    faIsRetreating = false
+    faRetreatLock = false
+    faLastRetreatTime = tick()
+    faDisableGravity()
+    faStartSpinning()
+    faStartCameraLock()
+    faStartAutoClick()
     if not faLoopActive then task.spawn(faMainLoop) end
 end
 
 local function faStop()
-    if faSpinConn  then faSpinConn:Disconnect();  faSpinConn=nil  end
-    if faCamConn   then faCamConn:Disconnect();   faCamConn=nil   end
-    if faClickConn then faClickConn:Disconnect();  faClickConn=nil end
-    faEnableGravity(); Camera.CameraType=Enum.CameraType.Custom; faLoopActive=false
+    if faSpinConnection then faSpinConnection:Disconnect() faSpinConnection = nil end
+    if faCameraConnection then faCameraConnection:Disconnect() faCameraConnection = nil end
+    if faAutoClickConnection then faAutoClickConnection:Disconnect() faAutoClickConnection = nil end
+    faEnableGravity()
+    Camera.CameraType = Enum.CameraType.Custom
+    faLoopActive = false
 end
 
 LocalPlayer.CharacterAdded:Connect(function(char)
-    if FULL_AUTO_ENABLED then task.wait(1); faStart() end
+    if FULL_AUTO_ENABLED then
+        task.wait(1)
+        faStart()
+    end
 end)
 
 -- ============================================
--- [FIX] CreateToggle - defaultValue 시 callback 즉시 호출
--- 핵심 수정 부분
+-- UI COMPONENTS
 -- ============================================
 local UIHandlers = {}
 
 local function CreateToggle(name, parent, callback, configType, defaultValue)
     local container = Instance.new("Frame")
-    container.Size = UDim2.new(1,0,0,24); container.BackgroundTransparency=1; container.Parent=parent
+    container.Size = UDim2.new(1, 0, 0, 24)
+    container.BackgroundTransparency = 1
+    container.Parent = parent
 
     local box = Instance.new("TextButton")
-    box.Size=UDim2.new(0,14,0,14); box.Position=UDim2.new(0,5,0.5,-7)
-    box.BackgroundColor3=Color3.fromRGB(0,0,0); box.Text=""; box.BorderSizePixel=0; box.Parent=container
+    box.Size = UDim2.new(0, 14, 0, 14)
+    box.Position = UDim2.new(0, 5, 0.5, -7)
+    box.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    box.Text = ""
+    box.BorderSizePixel = 0
+    box.Parent = container
+
     local boxStroke = Instance.new("UIStroke")
-    boxStroke.Color=Color3.fromRGB(255,255,255); boxStroke.Thickness=1
-    boxStroke.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; boxStroke.Parent=box
+    boxStroke.Color = Color3.fromRGB(255, 255, 255)
+    boxStroke.Thickness = 1
+    boxStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    boxStroke.Parent = box
 
     local checkInner = Instance.new("Frame")
-    checkInner.Name="CheckInner"; checkInner.Size=UDim2.new(1,-4,1,-4)
-    checkInner.Position=UDim2.new(0,2,0,2); checkInner.BackgroundColor3=Color3.fromRGB(255,255,255)
-    checkInner.Visible=(defaultValue==true); checkInner.BorderSizePixel=0; checkInner.Parent=box
+    checkInner.Name = "CheckInner"
+    checkInner.Size = UDim2.new(1, -4, 1, -4)
+    checkInner.Position = UDim2.new(0, 2, 0, 2)
+    checkInner.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    checkInner.Visible = (defaultValue == true)
+    checkInner.BorderSizePixel = 0
+    checkInner.Parent = box
     table.insert(ToggleCheckInners, checkInner)
 
     local label = Instance.new("TextButton")
-    label.Size=UDim2.new(1,-100,1,0); label.Position=UDim2.new(0,30,0,0)
-    label.BackgroundTransparency=1; label.Text=name; label.Font=Enum.Font.Code
-    label.TextColor3=Color3.fromRGB(255,255,255); label.TextSize=13
-    label.TextXAlignment=Enum.TextXAlignment.Left; label.Parent=container
+    label.Size = UDim2.new(1, -100, 1, 0)
+    label.Position = UDim2.new(0, 30, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = name
+    label.Font = Enum.Font.Code
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextSize = 13
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = container
 
     local enabled = defaultValue or false
-
-    local function setEnabled(val, silent)
+    local function setEnabled(val)
         enabled = val
         checkInner.Visible = val
-        if not silent and callback then callback(val) end
-        syncAndSave()  -- [FIX] 로컬 변수 → Config 동기화 후 저장
+        if callback then callback(val) end
+        saveConfig()
     end
-
-    -- [FIX] defaultValue가 true면 callback을 silent=false로 즉시 호출하여 기능 활성화
-    if defaultValue == true and callback then
-        task.defer(function()  -- defer: UI 생성 완료 후 호출
-            callback(true)
-        end)
-    end
-
     box.MouseButton1Click:Connect(function() setEnabled(not enabled) end)
     label.MouseButton1Click:Connect(function() setEnabled(not enabled) end)
 
-    -- Config 버튼
     if configType then
         local configBtn = Instance.new("TextButton")
-        configBtn.Size=UDim2.new(0,60,0,18); configBtn.Position=UDim2.new(1,-65,0.5,-9)
-        configBtn.BackgroundColor3=Color3.fromRGB(15,15,15); configBtn.Font=Enum.Font.Code
-        configBtn.TextColor3=Color3.fromRGB(255,255,255); configBtn.TextSize=11
-        configBtn.BorderSizePixel=0; configBtn.Parent=container
-        local cs = Instance.new("UIStroke"); cs.Color=Color3.fromRGB(255,255,255)
-        cs.Thickness=1; cs.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; cs.Parent=configBtn
+        configBtn.Size = UDim2.new(0, 60, 0, 18)
+        configBtn.Position = UDim2.new(1, -65, 0.5, -9)
+        configBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+        configBtn.Font = Enum.Font.Code
+        configBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        configBtn.TextSize = 11
+        configBtn.BorderSizePixel = 0
+        configBtn.Parent = container
+        local cs = Instance.new("UIStroke")
+        cs.Color = Color3.fromRGB(255, 255, 255)
+        cs.Thickness = 1
+        cs.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        cs.Parent = configBtn
 
         if configType == "Keybind" then
-            configBtn.Text = "["..formatKeyName(AIM_LOCK_KEY).."]"
+            configBtn.Text = "[" .. formatKeyName(AIM_LOCK_KEY) .. "]"
             configBtn.MouseButton1Click:Connect(function()
                 configBtn.Text = "..."
-                local conn; conn = UserInputService.InputBegan:Connect(function(input)
-                    local nb = input.UserInputType==Enum.UserInputType.Keyboard and input.KeyCode or input.UserInputType
+                local conn
+                conn = UserInputService.InputBegan:Connect(function(input)
+                    local nb = input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode or input.UserInputType
                     if nb ~= Enum.UserInputType.MouseMovement then
-                        AIM_LOCK_KEY = nb; Config.AIM_LOCK_KEY = nb
-                        configBtn.Text = "["..formatKeyName(nb).."]"
-                        UpdateKeybindInfo(); syncAndSave(); conn:Disconnect()
+                        AIM_LOCK_KEY = nb
+                        configBtn.Text = "[" .. formatKeyName(nb) .. "]"
+                        UpdateKeybindInfo(); saveConfig(); conn:Disconnect()
                     end
                 end)
             end)
         elseif configType == "RageBotKeybind" then
-            configBtn.Text = "["..formatKeyName(RAGE_BOT_KEY).."]"
+            configBtn.Text = "[" .. formatKeyName(RAGE_BOT_KEY) .. "]"
             configBtn.MouseButton1Click:Connect(function()
                 configBtn.Text = "..."
-                local conn; conn = UserInputService.InputBegan:Connect(function(input)
+                local conn
+                conn = UserInputService.InputBegan:Connect(function(input)
                     if input.UserInputType == Enum.UserInputType.Keyboard then
-                        RAGE_BOT_KEY = input.KeyCode; Config.RAGE_BOT_KEY = input.KeyCode
-                        configBtn.Text = "["..formatKeyName(input.KeyCode).."]"
-                        UpdateKeybindInfo(); syncAndSave(); conn:Disconnect()
+                        RAGE_BOT_KEY = input.KeyCode
+                        configBtn.Text = "[" .. formatKeyName(input.KeyCode) .. "]"
+                        UpdateKeybindInfo(); saveConfig(); conn:Disconnect()
                     end
                 end)
             end)
         elseif configType == "AimMode" then
             configBtn.Text = AUTO_AIM_MODE
             configBtn.MouseButton1Click:Connect(function()
-                AUTO_AIM_MODE = (AUTO_AIM_MODE=="Silent") and "Aim" or "Silent"
-                Config.AUTO_AIM_MODE = AUTO_AIM_MODE
-                configBtn.Text = AUTO_AIM_MODE; syncAndSave()
+                AUTO_AIM_MODE = (AUTO_AIM_MODE == "Silent") and "Aim" or "Silent"
+                configBtn.Text = AUTO_AIM_MODE
+                saveConfig()
             end)
         elseif configType == "MatchMode" then
             configBtn.Text = AUTO_MATCH_MODE
             local modes = {"1v1","2v2","3v3","4v4","5v5"}
             configBtn.MouseButton1Click:Connect(function()
                 local ci = 1
-                for i, m in ipairs(modes) do if m==AUTO_MATCH_MODE then ci=i; break end end
-                AUTO_MATCH_MODE = modes[(ci%#modes)+1]; Config.AUTO_MATCH_MODE = AUTO_MATCH_MODE
-                configBtn.Text = AUTO_MATCH_MODE; syncAndSave()
+                for i, m in ipairs(modes) do if m == AUTO_MATCH_MODE then ci = i break end end
+                AUTO_MATCH_MODE = modes[(ci % #modes) + 1]
+                configBtn.Text = AUTO_MATCH_MODE
+                saveConfig()
             end)
         end
     end
-
     return setEnabled
 end
 
-local function CreateButton(name, parent, cb)
+local function CreateButton(name, parent, callback)
     local btn = Instance.new("TextButton")
-    btn.Size=UDim2.new(0,140,0,26); btn.BackgroundColor3=Color3.fromRGB(15,15,15); btn.Text=name
-    btn.Font=Enum.Font.Code; btn.TextColor3=Color3.fromRGB(255,255,255); btn.TextSize=13
-    btn.BorderSizePixel=0; btn.Parent=parent
-    local s=Instance.new("UIStroke"); s.Color=Color3.fromRGB(255,255,255); s.Thickness=1
-    s.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; s.Parent=btn
-    btn.MouseButton1Click:Connect(cb)
+    btn.Size = UDim2.new(0, 140, 0, 26)
+    btn.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+    btn.Text = name
+    btn.Font = Enum.Font.Code
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextSize = 13
+    btn.BorderSizePixel = 0
+    btn.Parent = parent
+    local s = Instance.new("UIStroke")
+    s.Color = Color3.fromRGB(255, 255, 255)
+    s.Thickness = 1
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    s.Parent = btn
+    btn.MouseButton1Click:Connect(callback)
 end
 
 -- ============================================
--- AUTO MATCH
+-- [FIX] Auto Match: WaitForChild에 타임아웃 적용
 -- ============================================
 local function attemptJoinMatch()
     if not AUTO_MATCH_ENABLED then return end
-    task.spawn(function()
+    task.spawn(function()  -- [FIX] 비동기 처리
         pcall(function()
             local remotes = SafeWait(ReplicatedStorage, "Remotes", 3)
             if not remotes then return end
@@ -1066,7 +1356,6 @@ task.spawn(function()
     end
 end)
 
--- Player Tracking
 local function setupPlayerTracking(p)
     if p == LocalPlayer then return end
     p.CharacterAdded:Connect(function(char)
@@ -1081,27 +1370,22 @@ local function setupPlayerTracking(p)
             lastH = h
         end)
         hum.Died:Connect(function()
-            if NOTIFICATION_ENABLED and isEnemy(p) then createNotification("Killed "..p.Name) end
+            if NOTIFICATION_ENABLED and isEnemy(p) then createNotification("Killed " .. p.Name) end
         end)
     end)
 end
-
--- Aim Lock
-local isAimLockHeld = false
-local aimLockConn = nil
-local lastClickTime = 0
 
 local function getClosestPlayer()
     local closest, minD = nil, math.huge
     for _, p in pairs(Players:GetPlayers()) do
         if p ~= LocalPlayer and isEnemy(p) and p.Character then
             local head = p.Character:FindFirstChild("Head")
-            local hum  = p.Character:FindFirstChild("Humanoid")
+            local hum = p.Character:FindFirstChild("Humanoid")
             if head and hum and hum.Health > 0 then
-                local _, on = Camera:WorldToScreenPoint(head.Position)
-                if on and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                local _, onScreen = Camera:WorldToScreenPoint(head.Position)
+                if onScreen and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
                     local d = (LocalPlayer.Character.HumanoidRootPart.Position - head.Position).Magnitude
-                    if d < minD then minD=d; closest=p end
+                    if d < minD then minD = d; closest = p end
                 end
             end
         end
@@ -1114,39 +1398,40 @@ local function updateAimLock()
     local t = getClosestPlayer()
     if t and t.Character and t.Character:FindFirstChild("Head") then
         local pos = Camera:WorldToScreenPoint(t.Character.Head.Position)
-        pcall(function() mousemoverel(math.floor(pos.X-Mouse.X+0.5), math.floor(pos.Y-Mouse.Y+0.5)) end)
+        pcall(function() mousemoverel(math.floor(pos.X - Mouse.X + 0.5), math.floor(pos.Y - Mouse.Y + 0.5)) end)
     end
 end
 
+-- INPUT
 UserInputService.InputBegan:Connect(function(i, gpe)
     if gpe then return end
-    if AIM_LOCK_ENABLED and (i.KeyCode==AIM_LOCK_KEY or i.UserInputType==AIM_LOCK_KEY) then
+    if AIM_LOCK_ENABLED and (i.KeyCode == AIM_LOCK_KEY or i.UserInputType == AIM_LOCK_KEY) then
         isAimLockHeld = true
-        if aimLockConn then aimLockConn:Disconnect() end
-        aimLockConn = RunService.RenderStepped:Connect(updateAimLock)
+        if aimLockConnection then aimLockConnection:Disconnect() end
+        aimLockConnection = RunService.RenderStepped:Connect(updateAimLock)
     end
-    if RAGE_BOT_ENABLED and i.KeyCode==RAGE_BOT_KEY then
+    if RAGE_BOT_ENABLED and i.KeyCode == RAGE_BOT_KEY then
         rbEnabled = not rbEnabled
         if rbEnabled then
-            rbUpdateRefs()
+            rbUpdateCharacterRefs()
             if rbConnection then rbConnection:Disconnect() end
-            rbConnection = RunService.Heartbeat:Connect(rbLoop)
+            rbConnection = RunService.Heartbeat:Connect(rbMainLoop)
             createNotification("Rage Bot Activated!")
         else
-            if rbConnection then rbConnection:Disconnect(); rbConnection=nil end
-            if rbHrp then rbHrp.Velocity=Vector3.zero end
+            if rbConnection then rbConnection:Disconnect() rbConnection = nil end
+            if rbHrp then rbHrp.Velocity = Vector3.zero end
             createNotification("Rage Bot Deactivated!")
         end
     end
-    if not HUB_ANIMATION_PLAYING and LOADING_COMPLETE and i.KeyCode==Enum.KeyCode.K then
+    if not HUB_ANIMATION_PLAYING and i.KeyCode == Enum.KeyCode.K and LOADING_COMPLETE then
         if MainFrame.Visible then AnimateHubClose() else AnimateHubOpen() end
     end
 end)
 
 UserInputService.InputEnded:Connect(function(i)
-    if i.KeyCode==AIM_LOCK_KEY or i.UserInputType==AIM_LOCK_KEY then
-        isAimLockHeld=false
-        if aimLockConn then aimLockConn:Disconnect(); aimLockConn=nil end
+    if i.KeyCode == AIM_LOCK_KEY or i.UserInputType == AIM_LOCK_KEY then
+        isAimLockHeld = false
+        if aimLockConnection then aimLockConnection:Disconnect() aimLockConnection = nil end
     end
 end)
 
@@ -1159,7 +1444,7 @@ RunService.RenderStepped:Connect(function()
         local tgt = Mouse.Target
         if tgt and tgt.Parent then
             local p = Players:GetPlayerFromCharacter(tgt.Parent) or Players:GetPlayerFromCharacter(tgt.Parent.Parent)
-            if p and p~=LocalPlayer and isEnemy(p) and p.Character then
+            if p and p ~= LocalPlayer and isEnemy(p) and p.Character then
                 local hum = p.Character:FindFirstChild("Humanoid")
                 found = hum and hum.Health > 0 or false
             end
@@ -1167,7 +1452,7 @@ RunService.RenderStepped:Connect(function()
     end
     if found then
         local now = tick()
-        if now - lastClickTime >= 0.01 then
+        if now - lastClickTime >= CLICK_INTERVAL then
             lastClickTime = now
             pcall(function()
                 VirtualInputManager:SendMouseButtonEvent(Mouse.X, Mouse.Y, 0, true, game, 0)
@@ -1178,13 +1463,14 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- ESP
 local function updateESPStates()
     for _, p in pairs(Players:GetPlayers()) do
         local r = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
         if r then
-            local g = r:FindFirstChild("ESP_Gui"); if g then g.Enabled = ESP_ENABLED and isEnemy(p) end
-            local h = r:FindFirstChild("HealthESP_Gui"); if h then h.Enabled = HP_BAR_ENABLED and isEnemy(p) end
+            local g = r:FindFirstChild("ESP_Gui")
+            if g then g.Enabled = ESP_ENABLED and isEnemy(p) end
+            local h = r:FindFirstChild("HealthESP_Gui")
+            if h then h.Enabled = HP_BAR_ENABLED and isEnemy(p) end
         end
     end
 end
@@ -1192,30 +1478,61 @@ end
 local function createESP(player)
     if player == LocalPlayer then return end
     local function onChar(char)
-        local root = char:WaitForChild("HumanoidRootPart",5)
-        local hum  = char:WaitForChild("Humanoid",5)
+        local root = char:WaitForChild("HumanoidRootPart", 5)
+        local hum = char:WaitForChild("Humanoid", 5)
         if not root or not hum then return end
-        local bGui = Instance.new("BillboardGui",root); bGui.Name="ESP_Gui"
-        bGui.Size=UDim2.new(4,0,5.5,0); bGui.AlwaysOnTop=true; bGui.Enabled=ESP_ENABLED and isEnemy(player)
-        local cont = Instance.new("Frame",bGui); cont.Size=UDim2.new(1,0,1,0); cont.BackgroundTransparency=1
-        local function line(s,p)
-            local ol=Instance.new("Frame",cont); ol.BackgroundColor3=Color3.new(0,0,0); ol.BorderSizePixel=0
-            ol.Size=UDim2.new(s.X.Scale,s.X.Offset+2,s.Y.Scale,s.Y.Offset+2); ol.Position=UDim2.new(p.X.Scale,p.X.Offset-1,p.Y.Scale,p.Y.Offset-1); ol.ZIndex=1
-            local f=Instance.new("Frame",cont); f.BackgroundColor3=Color3.new(1,1,1); f.BorderSizePixel=0; f.Size=s; f.Position=p; f.ZIndex=2
+        local bGui = Instance.new("BillboardGui", root)
+        bGui.Name = "ESP_Gui"
+        bGui.Size = UDim2.new(4, 0, 5.5, 0)
+        bGui.AlwaysOnTop = true
+        bGui.Enabled = ESP_ENABLED and isEnemy(player)
+        local container = Instance.new("Frame", bGui)
+        container.Size = UDim2.new(1, 0, 1, 0)
+        container.BackgroundTransparency = 1
+        local function line(s, p)
+            local ol = Instance.new("Frame", container)
+            ol.BackgroundColor3 = Color3.new(0,0,0)
+            ol.BorderSizePixel = 0
+            ol.Size = UDim2.new(s.X.Scale, s.X.Offset+2, s.Y.Scale, s.Y.Offset+2)
+            ol.Position = UDim2.new(p.X.Scale, p.X.Offset-1, p.Y.Scale, p.Y.Offset-1)
+            ol.ZIndex = 1
+            local f = Instance.new("Frame", container)
+            f.BackgroundColor3 = Color3.new(1,1,1)
+            f.BorderSizePixel = 0
+            f.Size = s; f.Position = p; f.ZIndex = 2
         end
-        line(UDim2.new(1,0,0,1),UDim2.new(0,0,0,0)); line(UDim2.new(1,0,0,1),UDim2.new(0,0,1,-1))
-        line(UDim2.new(0,1,1,0),UDim2.new(0,0,0,0)); line(UDim2.new(0,1,1,0),UDim2.new(1,-1,0,0))
-        local hGui=Instance.new("BillboardGui",root); hGui.Name="HealthESP_Gui"
-        hGui.Size=UDim2.new(1,0,5.5,0); hGui.StudsOffset=Vector3.new(3,0,0); hGui.AlwaysOnTop=true; hGui.Enabled=HP_BAR_ENABLED and isEnemy(player)
-        local bg=Instance.new("Frame",hGui); bg.Size=UDim2.new(0.2,0,1,0); bg.BackgroundColor3=Color3.fromRGB(50,50,50); bg.BorderSizePixel=0
-        local fill=Instance.new("Frame",bg); fill.Size=UDim2.new(1,0,1,0); fill.Position=UDim2.new(0,0,1,0)
-        fill.AnchorPoint=Vector2.new(0,1); fill.BackgroundColor3=Color3.fromRGB(0,255,0); fill.BorderSizePixel=0
-        local txt=Instance.new("TextLabel",bg); txt.Size=UDim2.new(3,0,0.2,0); txt.Position=UDim2.new(1.2,0,0,0)
-        txt.BackgroundTransparency=1; txt.TextColor3=Color3.new(1,1,1); txt.TextScaled=true; txt.Font=Enum.Font.SourceSansBold
+        line(UDim2.new(1,0,0,1), UDim2.new(0,0,0,0))
+        line(UDim2.new(1,0,0,1), UDim2.new(0,0,1,-1))
+        line(UDim2.new(0,1,1,0), UDim2.new(0,0,0,0))
+        line(UDim2.new(0,1,1,0), UDim2.new(1,-1,0,0))
+        local hGui = Instance.new("BillboardGui", root)
+        hGui.Name = "HealthESP_Gui"
+        hGui.Size = UDim2.new(1,0,5.5,0)
+        hGui.StudsOffset = Vector3.new(3,0,0)
+        hGui.AlwaysOnTop = true
+        hGui.Enabled = HP_BAR_ENABLED and isEnemy(player)
+        local bg = Instance.new("Frame", hGui)
+        bg.Size = UDim2.new(0.2,0,1,0)
+        bg.BackgroundColor3 = Color3.fromRGB(50,50,50)
+        bg.BorderSizePixel = 0
+        local fill = Instance.new("Frame", bg)
+        fill.Size = UDim2.new(1,0,1,0)
+        fill.Position = UDim2.new(0,0,1,0)
+        fill.AnchorPoint = Vector2.new(0,1)
+        fill.BackgroundColor3 = Color3.fromRGB(0,255,0)
+        fill.BorderSizePixel = 0
+        local txt = Instance.new("TextLabel", bg)
+        txt.Size = UDim2.new(3,0,0.2,0)
+        txt.Position = UDim2.new(1.2,0,0,0)
+        txt.BackgroundTransparency = 1
+        txt.TextColor3 = Color3.new(1,1,1)
+        txt.TextScaled = true
+        txt.Font = Enum.Font.SourceSansBold
         local function update()
-            local pct=math.clamp(hum.Health/hum.MaxHealth,0,1)
-            fill.Size=UDim2.new(1,0,pct,0); fill.BackgroundColor3=Color3.fromHSV(pct*0.3,1,1)
-            txt.Text=math.floor(hum.Health).."/"..math.floor(hum.MaxHealth)
+            local pct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+            fill.Size = UDim2.new(1,0,pct,0)
+            fill.BackgroundColor3 = Color3.fromHSV(pct*0.3,1,1)
+            txt.Text = math.floor(hum.Health).."/"..math.floor(hum.MaxHealth)
         end
         hum.HealthChanged:Connect(update); update()
     end
@@ -1224,90 +1541,81 @@ local function createESP(player)
 end
 
 -- ============================================
--- TOGGLE 등록 - defaultValue로 저장된 config 전달
+-- TOGGLE REGISTRATIONS
 -- ============================================
-UIHandlers.UpdateSilentAim = CreateToggle("enabled (silent aim)", AimPage,
-    function(v) SILENT_AIM_ENABLED=v; Config.SILENT_AIM_ENABLED=v end, nil, SILENT_AIM_ENABLED)
+UIHandlers.UpdateSilentAim = CreateToggle("enabled (silent aim)", AimPage, function(v) SILENT_AIM_ENABLED = v end, nil, SILENT_AIM_ENABLED)
+UIHandlers.UpdateAimLock = CreateToggle("Aim Lock", AimPage, function(v)
+    AIM_LOCK_ENABLED = v; UpdateKeybindInfo()
+end, "Keybind", AIM_LOCK_ENABLED)
 
-UIHandlers.UpdateAimLock = CreateToggle("Aim Lock", AimPage,
-    function(v) AIM_LOCK_ENABLED=v; Config.AIM_LOCK_ENABLED=v; UpdateKeybindInfo() end,
-    "Keybind", AIM_LOCK_ENABLED)
+UIHandlers.UpdateAutoAim = CreateToggle("Auto Aim", AimPage, function(v)
+    AUTO_AIM_ENABLED = v
+end, "AimMode", AUTO_AIM_ENABLED)
 
-UIHandlers.UpdateAutoAim = CreateToggle("Auto Aim", AimPage,
-    function(v) AUTO_AIM_ENABLED=v; Config.AUTO_AIM_ENABLED=v end,
-    "AimMode", AUTO_AIM_ENABLED)
+UIHandlers.UpdateAutoMatch = CreateToggle("Auto Match", AimPage, function(v)
+    AUTO_MATCH_ENABLED = v
+    if v then attemptJoinMatch() end
+end, "MatchMode", AUTO_MATCH_ENABLED)
 
-UIHandlers.UpdateAutoMatch = CreateToggle("Auto Match", AimPage,
-    function(v) AUTO_MATCH_ENABLED=v; Config.AUTO_MATCH_ENABLED=v; if v then attemptJoinMatch() end end,
-    "MatchMode", AUTO_MATCH_ENABLED)
+UIHandlers.UpdateFullAuto = CreateToggle("full Auto", AimPage, function(v)
+    FULL_AUTO_ENABLED = v
+    if v then faStart(); createNotification("Full Auto Started")
+    else faStop(); createNotification("Full Auto Stopped") end
+end, nil, FULL_AUTO_ENABLED)
 
-UIHandlers.UpdateFullAuto = CreateToggle("full Auto", AimPage,
-    function(v)
-        FULL_AUTO_ENABLED=v; Config.FULL_AUTO_ENABLED=v
-        if v then faStart(); createNotification("Full Auto Started")
-        else faStop(); createNotification("Full Auto Stopped") end
-    end, nil, FULL_AUTO_ENABLED)
+UIHandlers.UpdateNoCoolTime = CreateToggle("No Cool Time (All)", AimPage, function(v)
+    NO_COOL_TIME_ENABLED = v
+    if v then
+        lastCooldownRemoval = 0; removeCooldowns()
+        task.spawn(function()
+            while NO_COOL_TIME_ENABLED do task.wait(10); if NO_COOL_TIME_ENABLED then removeCooldowns() end end
+        end)
+        createNotification("No Cool Time Enabled")
+    else
+        weaponDataCache = nil; createNotification("No Cool Time Disabled")
+    end
+end, nil, NO_COOL_TIME_ENABLED)
 
-UIHandlers.UpdateNoCoolTime = CreateToggle("No Cool Time (All)", AimPage,
-    function(v)
-        NO_COOL_TIME_ENABLED=v; Config.NO_COOL_TIME_ENABLED=v
-        if v then
-            lastCooldownTime=0; removeCooldowns()
-            task.spawn(function()
-                while NO_COOL_TIME_ENABLED do task.wait(10); if NO_COOL_TIME_ENABLED then removeCooldowns() end end
+UIHandlers.UpdateRageBot = CreateToggle("Rage bot", AimPage, function(v)
+    RAGE_BOT_ENABLED = v; UpdateKeybindInfo()
+    if v then
+        rbUpdateCharacterRefs()
+        createNotification("Rage Bot Ready! Press [" .. formatKeyName(RAGE_BOT_KEY) .. "]")
+    else
+        rbEnabled = false
+        if rbConnection then rbConnection:Disconnect() rbConnection = nil end
+        if rbHrp then rbHrp.Velocity = Vector3.zero end
+        createNotification("Rage Bot Disabled")
+    end
+end, "RageBotKeybind", RAGE_BOT_ENABLED)
+
+CreateToggle("No spread,recoil", AimPage, function(v)
+    NO_RECOIL_ENABLED = v
+    if v then
+        if not nrGunModule then initNoRecoilModules() end
+        task.delay(0.5, function() if NO_RECOIL_ENABLED then enableNoRecoil() end end)
+    else disableNoRecoil() end
+end, nil, NO_RECOIL_ENABLED)
+
+CreateToggle("enabled (esp)", VisualPage, function(v) ESP_ENABLED = v; updateESPStates() end, nil, ESP_ENABLED)
+CreateToggle("HP bar", VisualPage, function(v) HP_BAR_ENABLED = v; updateESPStates() end, nil, HP_BAR_ENABLED)
+CreateToggle("Notification", VisualPage, function(v) NOTIFICATION_ENABLED = v end, nil, NOTIFICATION_ENABLED)
+CreateToggle("third person", VisualPage, function(v)
+    THIRD_PERSON_ENABLED = v
+    if v then enableThirdPerson() else disableThirdPerson() end
+end, nil, THIRD_PERSON_ENABLED)
+
+CreateToggle("Load skin changer", VisualPage, function(v)
+    SKIN_CHANGER_ENABLED = v
+    if v then
+        task.spawn(function()  -- [FIX] 비동기 처리
+            local ok = pcall(function()
+                loadstring(game:HttpGet("https://raw.githubusercontent.com/kgycoder/Rivals-Skin-changer/refs/heads/main/Rivals-Skin%20changer", true))()
             end)
-            createNotification("No Cool Time Enabled")
-        else weaponDataCache=nil; createNotification("No Cool Time Disabled") end
-    end, nil, NO_COOL_TIME_ENABLED)
-
-UIHandlers.UpdateRageBot = CreateToggle("Rage bot", AimPage,
-    function(v)
-        RAGE_BOT_ENABLED=v; Config.RAGE_BOT_ENABLED=v; UpdateKeybindInfo()
-        if v then rbUpdateRefs(); createNotification("Rage Bot Ready! Press ["..formatKeyName(RAGE_BOT_KEY).."]")
-        else
-            rbEnabled=false
-            if rbConnection then rbConnection:Disconnect(); rbConnection=nil end
-            if rbHrp then rbHrp.Velocity=Vector3.zero end
-            createNotification("Rage Bot Disabled")
-        end
-    end, "RageBotKeybind", RAGE_BOT_ENABLED)
-
-CreateToggle("No spread,recoil", AimPage,
-    function(v)
-        NO_RECOIL_ENABLED=v; Config.NO_RECOIL_ENABLED=v
-        if v then
-            if not nrGunModule then initNoRecoilModules() end
-            task.delay(0.5, function() if NO_RECOIL_ENABLED then enableNoRecoil() end end)
-        else disableNoRecoil() end
-    end, nil, NO_RECOIL_ENABLED)
-
-CreateToggle("enabled (esp)", VisualPage,
-    function(v) ESP_ENABLED=v; Config.ESP_ENABLED=v; updateESPStates() end, nil, ESP_ENABLED)
-
-CreateToggle("HP bar", VisualPage,
-    function(v) HP_BAR_ENABLED=v; Config.HP_BAR_ENABLED=v; updateESPStates() end, nil, HP_BAR_ENABLED)
-
-CreateToggle("Notification", VisualPage,
-    function(v) NOTIFICATION_ENABLED=v; Config.NOTIFICATION_ENABLED=v end, nil, NOTIFICATION_ENABLED)
-
-CreateToggle("third person", VisualPage,
-    function(v)
-        THIRD_PERSON_ENABLED=v; Config.THIRD_PERSON_ENABLED=v
-        if v then enableThirdPerson() else disableThirdPerson() end
-    end, nil, THIRD_PERSON_ENABLED)
-
-CreateToggle("Load skin changer", VisualPage,
-    function(v)
-        SKIN_CHANGER_ENABLED=v; Config.SKIN_CHANGER_ENABLED=v
-        if v then
-            task.spawn(function()
-                local ok = pcall(function()
-                    loadstring(game:HttpGet("https://raw.githubusercontent.com/kgycoder/Rivals-Skin-changer/refs/heads/main/Rivals-Skin%20changer", true))()
-                end)
-                createNotification(ok and "Skin Changer Loaded" or "Skin Changer Failed")
-            end)
-        else createNotification("Skin Changer Disabled") end
-    end, nil, SKIN_CHANGER_ENABLED)
+            createNotification(ok and "Skin Changer Loaded" or "Skin Changer Failed")
+        end)
+    else createNotification("Skin Changer Disabled") end
+end, nil, SKIN_CHANGER_ENABLED)
 
 CreateButton("mesh wrapping", VisualPage, function()
     local VM = workspace:FindFirstChild("ViewModels")
@@ -1315,32 +1623,35 @@ CreateButton("mesh wrapping", VisualPage, function()
     if FP then
         for _, o in ipairs(FP:GetDescendants()) do
             if o:IsA("MeshPart") then
-                o.Material=Enum.Material.ForceField; o.Color=Color3.new(0,0,0)
-                for _, f in ipairs({Enum.NormalId.Top,Enum.NormalId.Bottom,Enum.NormalId.Left,Enum.NormalId.Right,Enum.NormalId.Front,Enum.NormalId.Back}) do
-                    local t=o:FindFirstChild("FixedTexture_"..f.Name) or Instance.new("Texture",o)
-                    t.Name="FixedTexture_"..f.Name; t.Texture="rbxassetid://135989547473439"; t.Face=f
-                    t.Color3=Color3.new(0,0,0); t.StudsPerTileU=0.1; t.StudsPerTileV=0.1
+                o.Material = Enum.Material.ForceField
+                o.Color = Color3.new(0,0,0)
+                for _, f in ipairs({Enum.NormalId.Top, Enum.NormalId.Bottom, Enum.NormalId.Left, Enum.NormalId.Right, Enum.NormalId.Front, Enum.NormalId.Back}) do
+                    local t = o:FindFirstChild("FixedTexture_"..f.Name) or Instance.new("Texture", o)
+                    t.Name = "FixedTexture_"..f.Name
+                    t.Texture = "rbxassetid://135989547473439"
+                    t.Face = f; t.Color3 = Color3.new(0,0,0)
+                    t.StudsPerTileU = 0.1; t.StudsPerTileV = 0.1
                 end
             end
         end
     end
 end)
 
--- Drag
-local dragging, dragStart, startPos = false, nil, nil
+-- DRAG
+local dragging, dragStart, startPos
 MainFrame.InputBegan:Connect(function(input)
-    if input.UserInputType==Enum.UserInputType.MouseButton1 and LOADING_COMPLETE then
-        dragging=true; dragStart=input.Position; startPos=MainFrame.Position
+    if input.UserInputType == Enum.UserInputType.MouseButton1 and LOADING_COMPLETE then
+        dragging = true; dragStart = input.Position; startPos = MainFrame.Position
     end
 end)
 UserInputService.InputChanged:Connect(function(input)
-    if dragging and input.UserInputType==Enum.UserInputType.MouseMovement then
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
         local d = input.Position - dragStart
-        MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset+d.X, startPos.Y.Scale, startPos.Y.Offset+d.Y)
+        MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
     end
 end)
 UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
 end)
 
 CloseBtn.MouseButton1Click:Connect(function()
@@ -1351,47 +1662,32 @@ end)
 -- LOADING SEQUENCE
 -- ============================================
 local function RunLoadingSequence()
-    -- Start anim
-    MainFrame.Size=UDim2.new(0,480,0,320); MainFrame.Position=UDim2.new(0.5,-240,0.5,-160)
-    MainFrame.BackgroundTransparency=1; MainStroke.Transparency=1
-    LoadingOverlay.Visible=true; ContentContainer.Visible=false; MainFrame.Visible=true
-    TweenService:Create(MainFrame, TweenInfo.new(0.4,Enum.EasingStyle.Quart,Enum.EasingDirection.Out), {BackgroundTransparency=0}):Play()
-    TweenService:Create(MainStroke, TweenInfo.new(0.4), {Transparency=0}):Play()
+    StartLoadingAnimation()
+    task.wait(0.5)
+    UpdateLoadingProgress(10, "Checking Services...")
     task.wait(0.2)
-    TweenService:Create(LoadingTitle,    TweenInfo.new(0.3), {TextTransparency=0}):Play(); task.wait(0.1)
-    TweenService:Create(LoadingSubtitle, TweenInfo.new(0.3), {TextTransparency=0}):Play(); task.wait(0.1)
-    TweenService:Create(ProgressBarBg,   TweenInfo.new(0.3), {BackgroundTransparency=0}):Play()
-    TweenService:Create(PBStroke,        TweenInfo.new(0.3), {Transparency=0}):Play()
-    TweenService:Create(LoadingStatus,   TweenInfo.new(0.3), {TextTransparency=0}):Play()
-    TweenService:Create(LoadingPct,      TweenInfo.new(0.3), {TextTransparency=0}):Play()
-
-    UpdateProgress(10, "Checking Services..."); task.wait(0.2)
-    UpdateProgress(20, "Waiting for Character...")
-
+    UpdateLoadingProgress(20, "Waiting for Character...")
+    -- [FIX] 캐릭터 대기를 루프로 처리 (WaitForChild 무한 대기 방지)
     for i = 1, 40 do
         local char = LocalPlayer.Character
         if char and char:FindFirstChild("HumanoidRootPart") then break end
         task.wait(0.1)
     end
-
-    UpdateProgress(30, "Setting up ESP..."); task.wait(0.1)
+    UpdateLoadingProgress(30, "Setting up ESP...")
     for _, p in pairs(Players:GetPlayers()) do pcall(function() createESP(p) end) end
     Players.PlayerAdded:Connect(createESP)
-
-    UpdateProgress(45, "Player Tracking..."); task.wait(0.1)
+    UpdateLoadingProgress(45, "Player Tracking...")
     for _, p in ipairs(Players:GetPlayers()) do pcall(function() setupPlayerTracking(p) end) end
     Players.PlayerAdded:Connect(setupPlayerTracking)
-
-    UpdateProgress(60, "Loading Weapon Modules..."); task.wait(0.1)
+    UpdateLoadingProgress(60, "Loading Weapon Modules...")
     if NO_RECOIL_ENABLED then initNoRecoilModules() end
     if NO_COOL_TIME_ENABLED then
-        lastCooldownTime=0; removeCooldowns()
+        lastCooldownRemoval = 0; removeCooldowns()
         task.spawn(function()
             while NO_COOL_TIME_ENABLED do task.wait(10); if NO_COOL_TIME_ENABLED then removeCooldowns() end end
         end)
     end
-
-    UpdateProgress(75, "Loading Scripts..."); task.wait(0.1)
+    UpdateLoadingProgress(75, "Loading External Scripts...")
     if SKIN_CHANGER_ENABLED then
         task.spawn(function()
             pcall(function()
@@ -1399,33 +1695,19 @@ local function RunLoadingSequence()
             end)
         end)
     end
-
-    UpdateProgress(88, "Initializing Features..."); task.wait(0.1)
+    UpdateLoadingProgress(85, "Initializing Features...")
     if AUTO_MATCH_ENABLED then attemptJoinMatch() end
-    if RAGE_BOT_ENABLED    then rbUpdateRefs() end
+    if RAGE_BOT_ENABLED then rbUpdateCharacterRefs() end
     if THIRD_PERSON_ENABLED then pcall(enableThirdPerson) end
-    updateESPStates(); ShowTab("Aim")
-
-    UpdateProgress(100, "All Systems Loaded!"); task.wait(0.2)
-
-    -- End anim
-    LoadingStatus.TextColor3 = Color3.fromRGB(100,255,100)
-    LoadingStatus.Text = "Loading Complete!"
-    task.wait(0.6)
-    for _, v in ipairs({LoadingTitle,LoadingSubtitle}) do TweenService:Create(v,TweenInfo.new(0.3),{TextTransparency=1}):Play() end
-    TweenService:Create(ProgressBarBg, TweenInfo.new(0.3), {BackgroundTransparency=1}):Play()
-    TweenService:Create(PBStroke,      TweenInfo.new(0.3), {Transparency=1}):Play()
-    TweenService:Create(ProgressBarFill, TweenInfo.new(0.3), {BackgroundTransparency=1}):Play()
-    TweenService:Create(LoadingStatus, TweenInfo.new(0.3), {TextTransparency=1}):Play()
-    TweenService:Create(LoadingPct,    TweenInfo.new(0.3), {TextTransparency=1}):Play()
-    task.wait(0.4)
-    LoadingOverlay.Visible = false
-    ContentContainer.Visible = true
-    FadeContentIn()
-    task.wait(0.3)
-    LOADING_COMPLETE = true
-    task.wait(0.5)
-    ShowKeybindInfo()
+    updateESPStates()
+    ShowTab("Aim")
+    UpdateLoadingProgress(100, "All Systems Loaded!")
+    task.wait(0.2)
+    EndLoadingAnimation(function()
+        task.wait(0.5)
+        ShowKeybindInfo()
+    end)
 end
 
+-- [FIX] 항상 로딩 시퀀스 실행 (FULL_AUTO 즉시실행 분기 제거)
 task.spawn(RunLoadingSequence)
