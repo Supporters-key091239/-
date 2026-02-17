@@ -1,29 +1,30 @@
--- KS-Rivals Script Hub - Full Anti-Freeze Rebuild v2
--- [FIX 목록]
--- 1. 모든 task.wait() 블로킹을 Tween.Completed / task.spawn으로 교체
--- 2. faPerformRetreat를 완전 비동기화
--- 3. RenderStepped 다중 연결을 단일 마스터 연결로 통합
--- 4. removeCooldowns 청크 분할 처리
--- 5. loadstring을 pcall+task.spawn 이중 보호 + 타임아웃 가드
--- 6. setupAutoReload BOOTSTRAP_CODE 대기시간 증가
--- 7. AnimateHubOpen/Close task.wait → Tween.Completed 체인
--- 8. HideKeybindInfo/ShowKeybindInfo task.wait 제거
--- 9. OnTeleport 핸들러 task.spawn 분리
--- 10. faMainLoop retreat를 task.spawn으로 분리, 중복 실행 방지
+-- KS-Rivals Script Hub - Anti-Freeze Rebuild v3
+-- ============================================
+-- v3 수정 목록
+-- [1] RenderStepped 내부 task.wait(0.01) 제거 → task.spawn 분리
+-- [2] saveConfig() 동기 writefile → task.defer 비동기 처리
+-- [3] Tween.Completed 누적 연결 → Once 패턴으로 교체
+-- [4] NO_COOL_TIME while 루프 중복 생성 → 단일 루프 플래그 보장
+-- [5] isVisible Raycast 결과 캐싱 (0.1초 간격)
+-- [6] FadeContentIn Tween 대량 생성 → UI 요소 사전 등록 테이블 사용
+-- [7] faIsFirstTeleport task.wait(2) → task.delay 교체
+-- [8] AnimateHub Tween.Completed 중복 콜백 방지 (Once 패턴)
+-- [9] faPressR task.wait → task.spawn 분리
+-- ============================================
 
 -- ============================================
 -- SERVICES
 -- ============================================
-local UserInputService = game:GetService("UserInputService")
-local Players          = game:GetService("Players")
-local RunService       = game:GetService("RunService")
+local UserInputService    = game:GetService("UserInputService")
+local Players             = game:GetService("Players")
+local RunService          = game:GetService("RunService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
-local TweenService     = game:GetService("TweenService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local HttpService      = game:GetService("HttpService")
-local LocalPlayer      = Players.LocalPlayer
-local Mouse            = LocalPlayer:GetMouse()
-local Camera           = workspace.CurrentCamera
+local TweenService        = game:GetService("TweenService")
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local HttpService         = game:GetService("HttpService")
+local LocalPlayer         = Players.LocalPlayer
+local Mouse               = LocalPlayer:GetMouse()
+local Camera              = workspace.CurrentCamera
 
 -- ============================================
 -- SAFE HELPERS
@@ -43,14 +44,10 @@ local function SafeRequire(module)
     return ok and result or nil
 end
 
--- [FIX] loadstring을 타임아웃 포함 완전 비동기 실행
--- 내부에서 yield가 길어도 메인 스레드에 영향 없음
+-- [FIX-1] SafeLoadstring: HTTP → compile → run 전부 별도 스레드
 local function SafeLoadstring(url, onSuccess, onFail)
     task.spawn(function()
-        -- HttpGet 자체가 블로킹이므로 별도 스레드에서 처리
-        local ok, code = pcall(function()
-            return game:HttpGet(url, true)
-        end)
+        local ok, code = pcall(function() return game:HttpGet(url, true) end)
         if not ok or not code then
             if onFail then task.spawn(onFail) end
             return
@@ -60,61 +57,55 @@ local function SafeLoadstring(url, onSuccess, onFail)
             if onFail then task.spawn(onFail) end
             return
         end
-        -- 실행도 별도 스레드 (loadFn 내부 yield가 있어도 안전)
-        local runOk = pcall(function()
-            task.spawn(loadFn)
+        task.spawn(loadFn)
+        if onSuccess then task.spawn(onSuccess) end
+    end)
+end
+
+-- [FIX-3] Once 패턴: Tween.Completed에 단 한 번만 연결
+local function TweenOnce(tween, callback)
+    local conn
+    conn = tween.Completed:Connect(function(state)
+        conn:Disconnect()
+        if callback then callback(state) end
+    end)
+    return conn
+end
+
+-- [FIX-2] saveConfig 비동기화: 동기 writefile을 task.defer로 처리
+local saveQueued = false
+local function saveConfig()
+    if saveQueued then return end
+    saveQueued = true
+    task.defer(function()
+        saveQueued = false
+        local config = {
+            ESP_ENABLED          = ESP_ENABLED,
+            SILENT_AIM_ENABLED   = SILENT_AIM_ENABLED,
+            HP_BAR_ENABLED       = HP_BAR_ENABLED,
+            AIM_LOCK_ENABLED     = AIM_LOCK_ENABLED,
+            AUTO_AIM_ENABLED     = AUTO_AIM_ENABLED,
+            NOTIFICATION_ENABLED = NOTIFICATION_ENABLED,
+            AUTO_MATCH_ENABLED   = AUTO_MATCH_ENABLED,
+            FULL_AUTO_ENABLED    = FULL_AUTO_ENABLED,
+            SKIN_CHANGER_ENABLED = SKIN_CHANGER_ENABLED,
+            NO_COOL_TIME_ENABLED = NO_COOL_TIME_ENABLED,
+            RAGE_BOT_ENABLED     = RAGE_BOT_ENABLED,
+            THIRD_PERSON_ENABLED = THIRD_PERSON_ENABLED,
+            NO_RECOIL_ENABLED    = NO_RECOIL_ENABLED,
+            AUTO_AIM_MODE        = AUTO_AIM_MODE,
+            AUTO_MATCH_MODE      = AUTO_MATCH_MODE,
+            AIM_LOCK_KEY         = tostring(AIM_LOCK_KEY),
+            RAGE_BOT_KEY         = tostring(RAGE_BOT_KEY),
+        }
+        pcall(function()
+            writefile("KSRivals_Config.json", HttpService:JSONEncode(config))
         end)
-        if runOk then
-            if onSuccess then task.spawn(onSuccess) end
-        else
-            if onFail then task.spawn(onFail) end
-        end
     end)
 end
 
 -- ============================================
--- GUI 사전 정리
--- ============================================
-pcall(function()
-    for _, gui in ipairs(game:GetService("CoreGui"):GetChildren()) do
-        if gui.Name == "KSRivals_Hub" then gui:Destroy() end
-    end
-end)
-pcall(function()
-    for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
-        if gui.Name == "NotificationSystem" or gui.Name == "KSRivals_Hub" then
-            gui:Destroy()
-        end
-    end
-end)
-pcall(function() RunService:UnbindFromRenderStep("ThirdPersonCamera") end)
-
--- ============================================
--- TEAM CHECK
--- ============================================
-local function getTeamID(player)
-    local teamID = player:GetAttribute("TeamID")
-    if teamID then return teamID end
-    if player.Character then
-        local teamValue = player.Character:FindFirstChild("TeamID")
-        if teamValue and (teamValue:IsA("StringValue") or teamValue:IsA("IntValue")) then
-            return teamValue.Value
-        end
-    end
-    if player.Team then return player.Team.Name end
-    return nil
-end
-
-local function isEnemy(player)
-    if not player or player == LocalPlayer then return false end
-    local myTeam    = getTeamID(LocalPlayer)
-    local theirTeam = getTeamID(player)
-    if not myTeam or not theirTeam then return false end
-    return myTeam ~= theirTeam
-end
-
--- ============================================
--- CONFIG
+-- CONFIG 변수 (saveConfig보다 먼저 선언)
 -- ============================================
 local ESP_ENABLED           = false
 local SILENT_AIM_ENABLED    = false
@@ -134,36 +125,16 @@ local AUTO_MATCH_MODE       = "1v1"
 local AIM_LOCK_KEY          = Enum.UserInputType.MouseButton2
 local RAGE_BOT_KEY          = Enum.KeyCode.Five
 
-local isAimLockHeld     = false
-local aimLockConnection = nil
-local lastClickTime     = 0
-local CLICK_INTERVAL    = 0.01
-local LOADING_COMPLETE  = false
+local isAimLockHeld         = false
+local aimLockConnection     = nil
+local lastClickTime         = 0
+local CLICK_INTERVAL        = 0.01
+local LOADING_COMPLETE      = false
 local HUB_ANIMATION_PLAYING = false
-local ToggleCheckInners = {}
+local ToggleCheckInners     = {}
 
-local function saveConfig()
-    local config = {
-        ESP_ENABLED          = ESP_ENABLED,
-        SILENT_AIM_ENABLED   = SILENT_AIM_ENABLED,
-        HP_BAR_ENABLED       = HP_BAR_ENABLED,
-        AIM_LOCK_ENABLED     = AIM_LOCK_ENABLED,
-        AUTO_AIM_ENABLED     = AUTO_AIM_ENABLED,
-        NOTIFICATION_ENABLED = NOTIFICATION_ENABLED,
-        AUTO_MATCH_ENABLED   = AUTO_MATCH_ENABLED,
-        FULL_AUTO_ENABLED    = FULL_AUTO_ENABLED,
-        SKIN_CHANGER_ENABLED = SKIN_CHANGER_ENABLED,
-        NO_COOL_TIME_ENABLED = NO_COOL_TIME_ENABLED,
-        RAGE_BOT_ENABLED     = RAGE_BOT_ENABLED,
-        THIRD_PERSON_ENABLED = THIRD_PERSON_ENABLED,
-        NO_RECOIL_ENABLED    = NO_RECOIL_ENABLED,
-        AUTO_AIM_MODE        = AUTO_AIM_MODE,
-        AUTO_MATCH_MODE      = AUTO_MATCH_MODE,
-        AIM_LOCK_KEY         = tostring(AIM_LOCK_KEY),
-        RAGE_BOT_KEY         = tostring(RAGE_BOT_KEY),
-    }
-    pcall(function() writefile("KSRivals_Config.json", HttpService:JSONEncode(config)) end)
-end
+-- [FIX-6] FadeContentIn용 사전 등록 테이블
+local FadableElements = {}
 
 local function loadConfig()
     local ok, result = pcall(function()
@@ -180,11 +151,11 @@ if savedConfig then
     ESP_ENABLED          = savedConfig.ESP_ENABLED          or false
     SILENT_AIM_ENABLED   = savedConfig.SILENT_AIM_ENABLED   or false
     HP_BAR_ENABLED       = savedConfig.HP_BAR_ENABLED       or false
-    AIM_LOCK_ENABLED     = savedConfig.AIM_LOCK_ENABLED      or false
+    AIM_LOCK_ENABLED     = savedConfig.AIM_LOCK_ENABLED     or false
     AUTO_AIM_ENABLED     = savedConfig.AUTO_AIM_ENABLED     or false
     NOTIFICATION_ENABLED = savedConfig.NOTIFICATION_ENABLED or false
     AUTO_MATCH_ENABLED   = savedConfig.AUTO_MATCH_ENABLED   or false
-    FULL_AUTO_ENABLED    = false   -- 항상 false로 시작 (즉시 실행 프리징 방지)
+    FULL_AUTO_ENABLED    = false  -- 항상 false로 시작 (즉시실행 프리징 방지)
     SKIN_CHANGER_ENABLED = savedConfig.SKIN_CHANGER_ENABLED or false
     NO_COOL_TIME_ENABLED = savedConfig.NO_COOL_TIME_ENABLED or false
     RAGE_BOT_ENABLED     = savedConfig.RAGE_BOT_ENABLED     or false
@@ -209,8 +180,24 @@ if savedConfig then
 end
 
 -- ============================================
+-- GUI 사전 정리
+-- ============================================
+pcall(function()
+    for _, gui in ipairs(game:GetService("CoreGui"):GetChildren()) do
+        if gui.Name == "KSRivals_Hub" then gui:Destroy() end
+    end
+end)
+pcall(function()
+    for _, gui in ipairs(LocalPlayer.PlayerGui:GetChildren()) do
+        if gui.Name == "NotificationSystem" or gui.Name == "KSRivals_Hub" then
+            gui:Destroy()
+        end
+    end
+end)
+pcall(function() RunService:UnbindFromRenderStep("ThirdPersonCamera") end)
+
+-- ============================================
 -- AUTO-RELOAD
--- [FIX] 대기시간 2→5초, pcall 이중 보호
 -- ============================================
 local SCRIPT_URL = "https://raw.githubusercontent.com/Supporters-key091239/-/refs/heads/main/%E2%94%8A%E2%95%98%E2%95%9B%E2%96%89%F0%9F%82%A8%E2%94%A7"
 local BOOTSTRAP_CODE = [[
@@ -222,22 +209,17 @@ pcall(function()
     end)
     if ok and code then
         local fnOk, fn = pcall(loadstring, code)
-        if fnOk and fn then
-            task.spawn(fn)
-        end
+        if fnOk and fn then task.spawn(fn) end
     end
 end)
 ]]
 
 local function setupAutoReload()
-    local qot = (syn and syn.queue_on_teleport)
-             or queue_on_teleport
-             or queueonteleport
+    local qot = (syn and syn.queue_on_teleport) or queue_on_teleport or queueonteleport
     if qot then pcall(function() qot(BOOTSTRAP_CODE) end) end
 end
 setupAutoReload()
 
--- [FIX] OnTeleport 핸들러 완전 비동기 처리
 LocalPlayer.OnTeleport:Connect(function(state)
     if state == Enum.TeleportState.Started then
         task.spawn(function()
@@ -246,6 +228,30 @@ LocalPlayer.OnTeleport:Connect(function(state)
         end)
     end
 end)
+
+-- ============================================
+-- TEAM CHECK
+-- ============================================
+local function getTeamID(player)
+    local teamID = player:GetAttribute("TeamID")
+    if teamID then return teamID end
+    if player.Character then
+        local tv = player.Character:FindFirstChild("TeamID")
+        if tv and (tv:IsA("StringValue") or tv:IsA("IntValue")) then
+            return tv.Value
+        end
+    end
+    if player.Team then return player.Team.Name end
+    return nil
+end
+
+local function isEnemy(player)
+    if not player or player == LocalPlayer then return false end
+    local myTeam    = getTeamID(LocalPlayer)
+    local theirTeam = getTeamID(player)
+    if not myTeam or not theirTeam then return false end
+    return myTeam ~= theirTeam
+end
 
 -- ============================================
 -- NOTIFICATION SYSTEM
@@ -288,25 +294,35 @@ local function createNotification(text)
     label.Font = Enum.Font.GothamBold
     label.TextXAlignment = Enum.TextXAlignment.Left
     label.Parent = notif
-    TweenService:Create(notif, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+    TweenService:Create(notif,
+        TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
         {Size = UDim2.new(1, 0, 0, 22)}):Play()
     task.delay(2, function()
-        if notif and notif.Parent then
-            local t = TweenService:Create(notif, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
-                {Size = UDim2.new(0, 0, 0, 22)})
-            t:Play()
-            t.Completed:Connect(function() if notif then notif:Destroy() end end)
-        end
+        if not (notif and notif.Parent) then return end
+        local t = TweenService:Create(notif,
+            TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+            {Size = UDim2.new(0, 0, 0, 22)})
+        t:Play()
+        TweenOnce(t, function() if notif then notif:Destroy() end end)
     end)
 end
 
 -- ============================================
 -- SILENT AIM
+-- [FIX-5] isVisible 결과 캐싱 (0.1초 간격)
 -- ============================================
-local metaTableHooked = false
+local metaTableHooked    = false
+local visibilityCache    = {}  -- [player] = {result, time}
+local VISIBILITY_CACHE_TTL = 0.1
 
-local function isVisible(targetHead)
+local function isVisible(targetHead, player)
     if not targetHead then return false end
+    -- [FIX-5] 캐시 확인
+    local now = tick()
+    local cached = visibilityCache[player]
+    if cached and (now - cached.time) < VISIBILITY_CACHE_TTL then
+        return cached.result
+    end
     local character = LocalPlayer.Character
     if not character then return false end
     local rayParams = RaycastParams.new()
@@ -314,8 +330,10 @@ local function isVisible(targetHead)
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
     local origin = Camera.CFrame.Position
     local ray = workspace:Raycast(origin, targetHead.Position - origin, rayParams)
-    if not ray then return true end
-    return ray.Instance:IsDescendantOf(targetHead.Parent)
+    local result = (not ray) or ray.Instance:IsDescendantOf(targetHead.Parent)
+    -- 캐시 저장
+    visibilityCache[player] = {result = result, time = now}
+    return result
 end
 
 local function getClosestPlayerForSilentAim()
@@ -331,7 +349,7 @@ local function getClosestPlayerForSilentAim()
             local hum  = player.Character:FindFirstChild("Humanoid")
             if head and hum and hum.Health > 0 then
                 local sp, onScreen = Camera:WorldToScreenPoint(head.Position)
-                if onScreen and isVisible(head) then
+                if onScreen and isVisible(head, player) then
                     local d = (Vector2.new(sp.X, sp.Y) - screenCenter).Magnitude
                     if d < shortestDist then shortestDist = d; closestPlayer = player end
                 end
@@ -475,17 +493,17 @@ end
 
 local function UpdateKeybindInfo()
     local lines = {"Hub Toggle: [K]"}
-    if AIM_LOCK_ENABLED then table.insert(lines, "Aim Lock: [" .. formatKeyName(AIM_LOCK_KEY) .. "]") end
-    if RAGE_BOT_ENABLED then table.insert(lines, "Rage Bot: [" .. formatKeyName(RAGE_BOT_KEY) .. "]") end
+    if AIM_LOCK_ENABLED  then table.insert(lines, "Aim Lock: ["  .. formatKeyName(AIM_LOCK_KEY)  .. "]") end
+    if RAGE_BOT_ENABLED  then table.insert(lines, "Rage Bot: ["  .. formatKeyName(RAGE_BOT_KEY)  .. "]") end
     KeybindInfo.Text = table.concat(lines, "\n")
     local h = (#lines * 15) + 30
-    KeybindInfoFrame.Size = UDim2.new(0, 170, 0, h)
-    KeybindInfoFrame.Position = UDim2.new(1, -180, 0.5, -h/2)
+    KeybindInfoFrame.Size     = UDim2.new(0, 170, 0, h)
+    KeybindInfoFrame.Position = UDim2.new(1, -180, 0.5, -h / 2)
 end
 
 -- ============================================
 -- KEYBIND ANIMATION
--- [FIX] 모든 task.wait() 제거 → Tween.Completed 체인으로 교체
+-- [FIX-3] Tween.Completed → TweenOnce (Once 패턴)
 -- ============================================
 local KEYBIND_ANIM = false
 
@@ -494,27 +512,31 @@ local function ShowKeybindInfo()
     KEYBIND_ANIM = true
     UpdateKeybindInfo()
     local h = KeybindInfoFrame.Size.Y.Offset
-    KeybindInfoFrame.Size = UDim2.new(0, 0, 0, h)
-    KeybindInfoFrame.Position = UDim2.new(1, 0, 0.5, -h/2)
+    KeybindInfoFrame.Size               = UDim2.new(0, 0, 0, h)
+    KeybindInfoFrame.Position           = UDim2.new(1, 0, 0.5, -h / 2)
     KeybindInfoFrame.BackgroundTransparency = 1
-    KeybindStroke.Transparency = 1
-    KeybindTitle.TextTransparency = 1
-    KeybindInfo.TextTransparency = 1
-    KeybindInfoFrame.Visible = true
+    KeybindStroke.Transparency          = 1
+    KeybindTitle.TextTransparency       = 1
+    KeybindInfo.TextTransparency        = 1
+    KeybindInfoFrame.Visible            = true
 
-    local tFrame = TweenService:Create(KeybindInfoFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
-        Size = UDim2.new(0, 170, 0, h),
-        Position = UDim2.new(1, -180, 0.5, -h/2),
-        BackgroundTransparency = 0.3
-    })
-    TweenService:Create(KeybindStroke, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Transparency = 0.3}):Play()
+    local tFrame = TweenService:Create(KeybindInfoFrame,
+        TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+            Size                    = UDim2.new(0, 170, 0, h),
+            Position                = UDim2.new(1, -180, 0.5, -h / 2),
+            BackgroundTransparency  = 0.3,
+        })
+    TweenService:Create(KeybindStroke,
+        TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+        {Transparency = 0.3}):Play()
     tFrame:Play()
-    -- [FIX] task.wait 제거 → Completed 콜백 체인
-    tFrame.Completed:Connect(function()
-        local t1 = TweenService:Create(KeybindTitle, TweenInfo.new(0.2), {TextTransparency = 0})
-        local t2 = TweenService:Create(KeybindInfo,  TweenInfo.new(0.2), {TextTransparency = 0.2})
+    TweenOnce(tFrame, function()  -- [FIX-3]
+        local t1 = TweenService:Create(KeybindTitle,
+            TweenInfo.new(0.2), {TextTransparency = 0})
+        local t2 = TweenService:Create(KeybindInfo,
+            TweenInfo.new(0.2), {TextTransparency = 0.2})
         t1:Play(); t2:Play()
-        t1.Completed:Connect(function() KEYBIND_ANIM = false end)
+        TweenOnce(t1, function() KEYBIND_ANIM = false end)  -- [FIX-3]
     end)
 end
 
@@ -524,20 +546,20 @@ local function HideKeybindInfo()
     local tT = TweenService:Create(KeybindTitle, TweenInfo.new(0.15), {TextTransparency = 1})
     local tI = TweenService:Create(KeybindInfo,  TweenInfo.new(0.15), {TextTransparency = 1})
     tT:Play(); tI:Play()
-    -- [FIX] task.wait(0.15) 제거 → Completed 체인
-    tT.Completed:Connect(function()
-        local h = KeybindInfoFrame.Size.Y.Offset
-        local tF = TweenService:Create(KeybindInfoFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
-            Size = UDim2.new(0, 0, 0, h),
-            Position = UDim2.new(1, 0, 0.5, -h/2),
-            BackgroundTransparency = 1
-        })
+    TweenOnce(tT, function()  -- [FIX-3]
+        local h  = KeybindInfoFrame.Size.Y.Offset
+        local tF = TweenService:Create(KeybindInfoFrame,
+            TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
+                Size                    = UDim2.new(0, 0, 0, h),
+                Position                = UDim2.new(1, 0, 0.5, -h / 2),
+                BackgroundTransparency  = 1,
+            })
         TweenService:Create(KeybindStroke, TweenInfo.new(0.25), {Transparency = 1}):Play()
         tF:Play()
-        tF.Completed:Connect(function()
-            KeybindInfoFrame.Visible = false
+        TweenOnce(tF, function()  -- [FIX-3]
+            KeybindInfoFrame.Visible             = false
             KeybindInfoFrame.BackgroundTransparency = 0.3
-            KeybindStroke.Transparency = 0.3
+            KeybindStroke.Transparency           = 0.3
             KEYBIND_ANIM = false
         end)
     end)
@@ -570,8 +592,12 @@ local function MakeLabel(parent, pos, size, text, textSize, font, zi)
     return l
 end
 
-local LoadingTitle    = MakeLabel(LoadingOverlay, UDim2.new(0.5,0,0.28,0), UDim2.new(0.8,0,0,35), "KS-RIVALS HUB", 24, Enum.Font.GothamBlack)
-local LoadingSubtitle = MakeLabel(LoadingOverlay, UDim2.new(0.5,0,0.38,0), UDim2.new(0.8,0,0,20), "MADE BY TEAM KS", 11)
+local LoadingTitle = MakeLabel(LoadingOverlay,
+    UDim2.new(0.5, 0, 0.28, 0), UDim2.new(0.8, 0, 0, 35),
+    "KS-RIVALS HUB", 24, Enum.Font.GothamBlack)
+local LoadingSubtitle = MakeLabel(LoadingOverlay,
+    UDim2.new(0.5, 0, 0.38, 0), UDim2.new(0.8, 0, 0, 20),
+    "MADE BY TEAM KS", 11)
 LoadingSubtitle.TextColor3 = Color3.fromRGB(100, 100, 100)
 
 local ProgressBarBg = Instance.new("Frame")
@@ -599,12 +625,16 @@ ProgressBarFill.BorderSizePixel = 0
 ProgressBarFill.ZIndex = 102
 Instance.new("UICorner", ProgressBarFill).CornerRadius = UDim.new(0, 4)
 
-local LoadingStatusText = MakeLabel(LoadingOverlay, UDim2.new(0.5,0,0.62,0), UDim2.new(0.8,0,0,22), "Initializing...", 13)
+local LoadingStatusText = MakeLabel(LoadingOverlay,
+    UDim2.new(0.5, 0, 0.62, 0), UDim2.new(0.8, 0, 0, 22), "Initializing...", 13)
 LoadingStatusText.TextColor3 = Color3.fromRGB(180, 180, 180)
 
-local LoadingPercent = MakeLabel(LoadingOverlay, UDim2.new(0.5,0,0.72,0), UDim2.new(0.8,0,0,18), "0%", 16, Enum.Font.GothamBlack)
+local LoadingPercent = MakeLabel(LoadingOverlay,
+    UDim2.new(0.5, 0, 0.72, 0), UDim2.new(0.8, 0, 0, 18), "0%", 16, Enum.Font.GothamBlack)
 
+-- ============================================
 -- CONTENT CONTAINER
+-- ============================================
 local ContentContainer = Instance.new("Frame")
 ContentContainer.Parent = MainFrame
 ContentContainer.BackgroundTransparency = 1
@@ -696,13 +726,13 @@ end
 
 local function ShowTab(t)
     if t == "Aim" then
-        AimPage.Visible = true;  VisualPage.Visible = false
-        AimTab.TextColor3    = Color3.fromRGB(255,255,255)
-        VisualTab.TextColor3 = Color3.fromRGB(130,130,130)
+        AimPage.Visible  = true;  VisualPage.Visible = false
+        AimTab.TextColor3    = Color3.fromRGB(255, 255, 255)
+        VisualTab.TextColor3 = Color3.fromRGB(130, 130, 130)
     else
-        AimPage.Visible = false; VisualPage.Visible = true
-        AimTab.TextColor3    = Color3.fromRGB(130,130,130)
-        VisualTab.TextColor3 = Color3.fromRGB(255,255,255)
+        AimPage.Visible  = false; VisualPage.Visible = true
+        AimTab.TextColor3    = Color3.fromRGB(130, 130, 130)
+        VisualTab.TextColor3 = Color3.fromRGB(255, 255, 255)
     end
 end
 
@@ -711,19 +741,60 @@ VisualTab.MouseButton1Click:Connect(function() ShowTab("Visual") end)
 
 -- ============================================
 -- HUB ANIMATION
--- [FIX] 모든 task.wait() 제거 → Tween.Completed 체인
+-- [FIX-6] FadeContentIn: GetDescendants 루프 대신 사전 등록 테이블 사용
+-- [FIX-3] Tween.Completed → TweenOnce
+-- [FIX-8] AnimateHub 빠른 반복 입력 시 중복 콜백 방지
 -- ============================================
+
+-- [FIX-6] UI 요소를 생성 시점에 등록 (FadeContentIn에서 재사용)
+-- {element, property, targetValue, originalValue}
+-- 이 함수는 UI 생성 직후 호출해서 등록
+local function RegisterFadable(element, property, originalValue)
+    table.insert(FadableElements, {
+        element       = element,
+        property      = property,
+        originalValue = originalValue,
+    })
+end
+
 local function FadeContentIn()
-    for _, child in ipairs(ContentContainer:GetDescendants()) do
-        if IsToggleCheckInner(child) then continue end
-        if child:IsA("TextLabel") or child:IsA("TextButton") then
-            child.TextTransparency = 1
-            TweenService:Create(child, TweenInfo.new(0.2), {TextTransparency = 0}):Play()
+    -- [FIX-6] 사전 등록된 요소만 Tween → GetDescendants 루프 제거
+    for _, info in ipairs(FadableElements) do
+        local el  = info.element
+        local prop = info.property
+        local orig = info.originalValue
+        if el and el.Parent then
+            -- 시작값 초기화
+            el[prop] = 1
+            TweenService:Create(el, TweenInfo.new(0.2), {[prop] = orig}):Play()
         end
-        if child:IsA("Frame") and child.BackgroundTransparency < 1 then
-            local orig = child.BackgroundTransparency
-            child.BackgroundTransparency = 1
-            TweenService:Create(child, TweenInfo.new(0.2), {BackgroundTransparency = orig}):Play()
+    end
+end
+
+local function FadeContentOut(onDone)
+    local count    = #FadableElements
+    if count == 0 then if onDone then onDone() end return end
+    local finished = 0
+    local fired    = false
+    for _, info in ipairs(FadableElements) do
+        local el   = info.element
+        local prop = info.property
+        if el and el.Parent then
+            local tw = TweenService:Create(el, TweenInfo.new(0.15), {[prop] = 1})
+            tw:Play()
+            TweenOnce(tw, function()  -- [FIX-3]
+                finished = finished + 1
+                if finished >= count and not fired then
+                    fired = true
+                    if onDone then onDone() end
+                end
+            end)
+        else
+            finished = finished + 1
+            if finished >= count and not fired then
+                fired = true
+                if onDone then onDone() end
+            end
         end
     end
 end
@@ -732,24 +803,26 @@ local function AnimateHubOpen()
     if HUB_ANIMATION_PLAYING then return end
     HUB_ANIMATION_PLAYING = true
     HideKeybindInfo()
-    MainFrame.Size = UDim2.new(0, 480, 0, 0)
-    MainFrame.Position = UDim2.new(0.5, -240, 0.5, 0)
+    MainFrame.Size                  = UDim2.new(0, 480, 0, 0)
+    MainFrame.Position              = UDim2.new(0.5, -240, 0.5, 0)
     MainFrame.BackgroundTransparency = 1
-    MainStroke.Transparency = 1
-    ContentContainer.Visible = false
-    MainFrame.Visible = true
-    local t = TweenService:Create(MainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
-        Size = UDim2.new(0, 480, 0, 320),
-        Position = UDim2.new(0.5, -240, 0.5, -160),
-        BackgroundTransparency = 0
-    })
-    TweenService:Create(MainStroke, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Transparency = 0}):Play()
+    MainStroke.Transparency         = 1
+    ContentContainer.Visible        = false
+    MainFrame.Visible               = true
+
+    local t = TweenService:Create(MainFrame,
+        TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+            Size                    = UDim2.new(0, 480, 0, 320),
+            Position                = UDim2.new(0.5, -240, 0.5, -160),
+            BackgroundTransparency  = 0,
+        })
+    TweenService:Create(MainStroke,
+        TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+        {Transparency = 0}):Play()
     t:Play()
-    -- [FIX] task.wait(0.2) 제거 → Completed 체인
-    t.Completed:Connect(function()
+    TweenOnce(t, function()  -- [FIX-3][FIX-8]
         ContentContainer.Visible = true
         FadeContentIn()
-        -- FadeContentIn 자체가 0.2초 Tween이므로 별도 대기 불필요
         task.delay(0.2, function() HUB_ANIMATION_PLAYING = false end)
     end)
 end
@@ -757,63 +830,57 @@ end
 local function AnimateHubClose(callback)
     if HUB_ANIMATION_PLAYING then return end
     HUB_ANIMATION_PLAYING = true
-    -- 콘텐츠 페이드 아웃 Tween 시작
-    local fadeCount = 0
-    local fadeDone  = false
-    for _, child in ipairs(ContentContainer:GetDescendants()) do
-        if IsToggleCheckInner(child) then continue end
-        if child:IsA("TextLabel") or child:IsA("TextButton") then
-            fadeCount = fadeCount + 1
-            local tw = TweenService:Create(child, TweenInfo.new(0.15), {TextTransparency = 1})
-            tw:Play()
-        end
-        if child:IsA("Frame") and child.BackgroundTransparency < 1 then
-            TweenService:Create(child, TweenInfo.new(0.15), {BackgroundTransparency = 1}):Play()
-        end
-    end
-    -- [FIX] task.wait(0.15) 제거 → task.delay로 비블로킹 대기
-    task.delay(0.15, function()
+    FadeContentOut(function()  -- [FIX-6] 등록된 요소만 페이드
         ContentContainer.Visible = false
-        local t = TweenService:Create(MainFrame, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
-            Size = UDim2.new(0, 480, 0, 0),
-            Position = UDim2.new(0.5, -240, 0.5, 0),
-            BackgroundTransparency = 1
-        })
+        local t = TweenService:Create(MainFrame,
+            TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
+                Size                    = UDim2.new(0, 480, 0, 0),
+                Position                = UDim2.new(0.5, -240, 0.5, 0),
+                BackgroundTransparency  = 1,
+            })
         TweenService:Create(MainStroke, TweenInfo.new(0.2), {Transparency = 1}):Play()
         t:Play()
-        t.Completed:Connect(function()
-            MainFrame.Visible = false
-            MainFrame.Size = UDim2.new(0, 480, 0, 320)
-            MainFrame.Position = UDim2.new(0.5, -240, 0.5, -160)
+        TweenOnce(t, function()  -- [FIX-3][FIX-8]
+            MainFrame.Visible               = false
+            MainFrame.Size                  = UDim2.new(0, 480, 0, 320)
+            MainFrame.Position              = UDim2.new(0.5, -240, 0.5, -160)
             MainFrame.BackgroundTransparency = 0
-            MainStroke.Transparency = 0
-            HUB_ANIMATION_PLAYING = false
+            MainStroke.Transparency         = 0
+            HUB_ANIMATION_PLAYING           = false
             ShowKeybindInfo()
             if callback then callback() end
         end)
     end)
 end
 
+-- ============================================
+-- LOADING PROGRESS
+-- ============================================
 local function UpdateLoadingProgress(pct, status)
     LoadingPercent.Text = math.floor(pct) .. "%"
     if status then LoadingStatusText.Text = status end
-    TweenService:Create(ProgressBarFill, TweenInfo.new(0.3), {Size = UDim2.new(pct/100, 0, 1, 0)}):Play()
+    TweenService:Create(ProgressBarFill, TweenInfo.new(0.3),
+        {Size = UDim2.new(pct / 100, 0, 1, 0)}):Play()
 end
 
 local function StartLoadingAnimation()
-    MainFrame.Size = UDim2.new(0, 480, 0, 320)
-    MainFrame.Position = UDim2.new(0.5, -240, 0.5, -160)
+    MainFrame.Size                  = UDim2.new(0, 480, 0, 320)
+    MainFrame.Position              = UDim2.new(0.5, -240, 0.5, -160)
     MainFrame.BackgroundTransparency = 1
-    MainStroke.Transparency = 1
-    LoadingOverlay.Visible = true
-    ContentContainer.Visible = false
-    MainFrame.Visible = true
-    TweenService:Create(MainFrame,  TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundTransparency = 0}):Play()
-    TweenService:Create(MainStroke, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Transparency = 0}):Play()
+    MainStroke.Transparency         = 1
+    LoadingOverlay.Visible          = true
+    ContentContainer.Visible        = false
+    MainFrame.Visible               = true
+    TweenService:Create(MainFrame,
+        TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+        {BackgroundTransparency = 0}):Play()
+    TweenService:Create(MainStroke,
+        TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+        {Transparency = 0}):Play()
     task.wait(0.2)
-    TweenService:Create(LoadingTitle,    TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+    TweenService:Create(LoadingTitle,        TweenInfo.new(0.3), {TextTransparency = 0}):Play()
     task.wait(0.1)
-    TweenService:Create(LoadingSubtitle, TweenInfo.new(0.3), {TextTransparency = 0}):Play()
+    TweenService:Create(LoadingSubtitle,     TweenInfo.new(0.3), {TextTransparency = 0}):Play()
     task.wait(0.1)
     TweenService:Create(ProgressBarBg,       TweenInfo.new(0.3), {BackgroundTransparency = 0}):Play()
     TweenService:Create(ProgressBarBgStroke, TweenInfo.new(0.3), {Transparency = 0}):Play()
@@ -822,19 +889,20 @@ local function StartLoadingAnimation()
 end
 
 local function EndLoadingAnimation(callback)
-    LoadingStatusText.Text = "Loading Complete!"
+    LoadingStatusText.Text      = "Loading Complete!"
     LoadingStatusText.TextColor3 = Color3.fromRGB(100, 255, 100)
     task.wait(0.6)
-    for _, v in ipairs({LoadingTitle, LoadingSubtitle, ProgressBarBg, ProgressBarBgStroke,
-                        ProgressBarFill, LoadingStatusText, LoadingPercent}) do
+    for _, v in ipairs({LoadingTitle, LoadingSubtitle, ProgressBarBg,
+                        ProgressBarBgStroke, ProgressBarFill,
+                        LoadingStatusText, LoadingPercent}) do
         local prop
-        if v:IsA("UIStroke") then prop = "Transparency"
-        elseif v:IsA("Frame") then prop = "BackgroundTransparency"
-        else prop = "TextTransparency" end
+        if v:IsA("UIStroke")    then prop = "Transparency"
+        elseif v:IsA("Frame")   then prop = "BackgroundTransparency"
+        else                         prop = "TextTransparency" end
         TweenService:Create(v, TweenInfo.new(0.3), {[prop] = 1}):Play()
     end
     task.wait(0.4)
-    LoadingOverlay.Visible = false
+    LoadingOverlay.Visible   = false
     ContentContainer.Visible = true
     FadeContentIn()
     task.wait(0.3)
@@ -856,9 +924,9 @@ local function initNoRecoilModules()
             if module:IsA("ModuleScript") and module.Name == "Gun" then
                 nrGunModule = SafeRequire(module)
                 if nrGunModule then
-                    nrOriginalRecoil         = nrGunModule._Recoil
-                    nrOriginalStartShooting  = nrGunModule.StartShooting
-                    nrOriginal_LocalTracers  = nrGunModule._LocalTracers
+                    nrOriginalRecoil        = nrGunModule._Recoil
+                    nrOriginalStartShooting = nrGunModule.StartShooting
+                    nrOriginal_LocalTracers = nrGunModule._LocalTracers
                 end
                 break
             end
@@ -908,7 +976,6 @@ end
 -- ============================================
 -- THIRD PERSON
 -- ============================================
-local thirdPersonConnection      = nil
 local thirdPersonWheelConnection = nil
 local distance     = 12
 local heightOffset = 2.5
@@ -928,12 +995,10 @@ local function updateThirdPersonCamera()
 end
 
 local function enableThirdPerson()
-    if thirdPersonConnection      then thirdPersonConnection:Disconnect() end
     if thirdPersonWheelConnection then thirdPersonWheelConnection:Disconnect() end
     RunService:UnbindFromRenderStep("ThirdPersonCamera")
     RunService:BindToRenderStep("ThirdPersonCamera",
         Enum.RenderPriority.Camera.Value + 1, updateThirdPersonCamera)
-    thirdPersonConnection = true
     thirdPersonWheelConnection = UserInputService.InputChanged:Connect(function(input)
         if THIRD_PERSON_ENABLED and input.UserInputType == Enum.UserInputType.MouseWheel then
             distance = math.clamp(distance - (input.Position.Z * 1.5), 3, 30)
@@ -944,7 +1009,6 @@ end
 
 local function disableThirdPerson()
     RunService:UnbindFromRenderStep("ThirdPersonCamera")
-    thirdPersonConnection = nil
     if thirdPersonWheelConnection then
         thirdPersonWheelConnection:Disconnect()
         thirdPersonWheelConnection = nil
@@ -956,15 +1020,15 @@ end
 
 -- ============================================
 -- NO COOL TIME
--- [FIX] 청크 분할 처리로 프레임 스파이크 방지
+-- [FIX-4] 단일 루프 플래그로 중복 방지
 -- ============================================
-local weaponDataCache      = nil
-local lastCooldownRemoval  = 0
-local noCoolTimeApplied    = false
-local COOLDOWN_KEYS        = {
+local weaponDataCache       = nil
+local lastCooldownRemoval   = 0
+local noCoolTimeLoopRunning = false  -- [FIX-4]
+local COOLDOWN_KEYS = {
     "ShootCooldown","ShootBurstCooldown","AttackCooldown","HeavyAttackCooldown",
     "Cooldown","DeflectCooldown","DashCooldown","BuildCooldown","SpinCooldown",
-    "AirblastCooldown","QuickShotCooldown","TransitionCooldown"
+    "AirblastCooldown","QuickShotCooldown","TransitionCooldown",
 }
 
 local function removeCooldowns()
@@ -986,29 +1050,39 @@ local function removeCooldowns()
                 if not weaponDataCache then return false end
             end
             if not weaponDataCache.Items then return false end
-
-            -- [FIX] 청크 처리: 10개씩 나눠 프레임 양보
+            -- [FIX] 청크 분할 처리
             local itemList = {}
-            for k, v in pairs(weaponDataCache.Items) do
+            for _, v in pairs(weaponDataCache.Items) do
                 table.insert(itemList, v)
             end
-            local CHUNK = 10
-            for i = 1, #itemList, CHUNK do
-                for j = i, math.min(i + CHUNK - 1, #itemList) do
+            for i = 1, #itemList, 10 do
+                for j = i, math.min(i + 9, #itemList) do
                     local s = itemList[j]
                     for _, k in ipairs(COOLDOWN_KEYS) do
                         if s[k] then s[k] = 0 end
                     end
                     if s.ReloadTime then s.ReloadTime = 0.01 end
                 end
-                task.wait()  -- 매 청크마다 프레임 양보
+                task.wait()
             end
             return true
         end)
         if ok and result then
-            noCoolTimeApplied = true
             lastCooldownRemoval = now
         end
+    end)
+end
+
+-- [FIX-4] 단일 루프만 실행되도록 보장
+local function startNoCoolTimeLoop()
+    if noCoolTimeLoopRunning then return end
+    noCoolTimeLoopRunning = true
+    task.spawn(function()
+        while NO_COOL_TIME_ENABLED do
+            task.wait(10)
+            if NO_COOL_TIME_ENABLED then removeCooldowns() end
+        end
+        noCoolTimeLoopRunning = false
     end)
 end
 
@@ -1052,15 +1126,15 @@ local function rbMainLoop()
         local thm = rbTarget.Character:FindFirstChild("Humanoid")
         if th and thm and thm.Health > 0 then
             local tp = th.Position + Vector3.new(
-                math.random(-8,8), math.random(6,12), math.random(-8,8))
+                math.random(-8, 8), math.random(6, 12), math.random(-8, 8))
             rbHrp.CFrame = CFrame.new(tp)
             local t = tick() * 25
             rbHrp.CFrame = rbHrp.CFrame * CFrame.Angles(
-                math.rad(math.sin(t*3.7)*360),
-                math.rad(math.cos(t*4.3)*360),
-                math.rad(math.sin(t*5.1)*360))
+                math.rad(math.sin(t * 3.7) * 360),
+                math.rad(math.cos(t * 4.3) * 360),
+                math.rad(math.sin(t * 5.1) * 360))
             rbHrp.Velocity = Vector3.new(
-                math.random(-50,50), math.random(-50,50), math.random(-50,50))
+                math.random(-50, 50), math.random(-50, 50), math.random(-50, 50))
         end
     end
 end
@@ -1075,39 +1149,34 @@ end)
 
 -- ============================================
 -- FULL AUTO
--- [FIX] RenderStepped 단일 마스터 연결로 통합
--- [FIX] faPerformRetreat 완전 비동기 (task.spawn 분리)
--- [FIX] 중복 루프 실행 방지 강화
+-- [FIX-7] faIsFirstTeleport task.wait → task.delay
+-- [FIX-9] faPressR task.wait → task.spawn 분리
 -- ============================================
-local faTargetPlayer       = nil
-local faIsAbove            = false
-local faLastHealth         = 100
-local faLoopActive         = false
-local faLastAutoClickTime  = 0
-local faAutoClickPaused    = false
-local faGravityInstalled   = false
-local faLastRetreatTime    = 0
-local faIsRetreating       = false
-local faRetreatLock        = false
-local faIsFirstTeleport    = true
-local faMasterConnection   = nil  -- [FIX] 단일 마스터 연결
+local faTargetPlayer      = nil
+local faIsAbove           = false
+local faLastHealth        = 100
+local faLoopActive        = false
+local faLastAutoClickTime = 0
+local faAutoClickPaused   = false
+local faLastRetreatTime   = 0
+local faIsRetreating      = false
+local faRetreatLock       = false
+local faIsFirstTeleport   = true
+local faMasterConnection  = nil
 
--- Gravity BodyVelocity 관리
 local function faInstallNoGravity()
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if root and not root:FindFirstChild("FA_NoGravity") then
         local bv = Instance.new("BodyVelocity")
-        bv.Name = "FA_NoGravity"
+        bv.Name     = "FA_NoGravity"
         bv.MaxForce = Vector3.new(0, math.huge, 0)
         bv.Velocity = Vector3.zero
-        bv.Parent = root
-        faGravityInstalled = true
+        bv.Parent   = root
     end
 end
 
 local function faRemoveNoGravity()
-    faGravityInstalled = false
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if root then
@@ -1116,13 +1185,15 @@ local function faRemoveNoGravity()
     end
 end
 
+-- [FIX-9] faPressR: task.wait 제거, 완전 비동기 처리
 local function faPressR()
-    VirtualInputManager:SendKeyEvent(true,  Enum.KeyCode.R, false, game)
-    task.wait(0.05)
-    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+    task.spawn(function()
+        VirtualInputManager:SendKeyEvent(true,  Enum.KeyCode.R, false, game)
+        task.wait(0.05)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+    end)
 end
 
--- [FIX] Retreat를 task.spawn 분리 → faMainLoop를 블로킹하지 않음
 local function faPerformRetreat(targetRoot)
     if faRetreatLock then return end
     task.spawn(function()
@@ -1138,16 +1209,19 @@ local function faPerformRetreat(targetRoot)
             return
         end
         Camera.CameraType = Enum.CameraType.Custom
-        pcall(function() root.CFrame = CFrame.new(targetRoot.Position + Vector3.new(0, 10000, 0)) end)
+        pcall(function()
+            root.CFrame = CFrame.new(targetRoot.Position + Vector3.new(0, 10000, 0))
+        end)
         task.wait(0.2)
-        faPressR()
+        faPressR()  -- [FIX-9] 이미 task.spawn 내부이므로 faPressR 자체도 spawn
         task.wait(2)
         faAutoClickPaused = false
         faIsRetreating    = false
         faLastRetreatTime = tick()
         faIsAbove         = false
         faRetreatLock     = false
-        local newHum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+        local newHum = LocalPlayer.Character
+                    and LocalPlayer.Character:FindFirstChild("Humanoid")
         if newHum then faLastHealth = newHum.Health end
     end)
 end
@@ -1179,7 +1253,7 @@ local function faFindClosest()
     return closest
 end
 
--- [FIX] 단일 마스터 RenderStepped에서 모든 FA 로직 처리
+-- 단일 마스터 RenderStepped
 local function faStartMaster()
     if faMasterConnection then faMasterConnection:Disconnect() end
     faMasterConnection = RunService.RenderStepped:Connect(function()
@@ -1188,51 +1262,47 @@ local function faStartMaster()
             faMasterConnection = nil
             return
         end
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
 
-        local char   = LocalPlayer.Character
-        local root   = char and char:FindFirstChild("HumanoidRootPart")
-
-        -- [Gravity] 매 프레임 확인 (설치 안 됐으면 설치)
+        -- Gravity 유지
         if root and not root:FindFirstChild("FA_NoGravity") then
             faInstallNoGravity()
         end
-
-        -- [Spin] 후퇴 중이 아닐 때
+        -- Spin (후퇴 중 제외)
         if root and not faIsRetreating then
             root.CFrame = root.CFrame * CFrame.Angles(
-                math.rad(math.random(-30,30)),
-                math.rad(math.random(0,360)),
-                math.rad(math.random(-30,30)))
+                math.rad(math.random(-30, 30)),
+                math.rad(math.random(0, 360)),
+                math.rad(math.random(-30, 30)))
         end
-
-        -- [Camera Lock] 후퇴 중이 아닐 때
+        -- Camera Lock (후퇴 중 제외)
         if not faIsRetreating and faTargetPlayer and faTargetPlayer.Character and root then
             local head = faTargetPlayer.Character:FindFirstChild("Head")
             if head then
                 Camera.CameraType = Enum.CameraType.Scriptable
-                Camera.CFrame = CFrame.new(root.Position + Vector3.new(0,5,0), head.Position)
+                Camera.CFrame     = CFrame.new(root.Position + Vector3.new(0, 5, 0), head.Position)
             end
         end
-
-        -- [Auto Click] 조건 충족 시
-        if not faAutoClickPaused and not faIsRetreating and not MainFrame.Visible and faInRange() then
+        -- [FIX-1] Auto Click: task.spawn으로 분리해 RenderStepped 블로킹 없음
+        if not faAutoClickPaused and not faIsRetreating
+                and not MainFrame.Visible and faInRange() then
             local now = tick()
             if now - faLastAutoClickTime >= 0.02 then
                 faLastAutoClickTime = now
-                pcall(mouse1click)
+                task.spawn(function() pcall(mouse1click) end)  -- [FIX-1]
             end
         end
     end)
 end
 
--- [FIX] faMainLoop: retreat를 task.spawn으로 분리하여 루프 블로킹 없음
+-- [FIX-7] faIsFirstTeleport task.wait(2) → task.delay 교체
 local function faMainLoop()
     faLoopActive = true
     while FULL_AUTO_ENABLED do
         task.wait(0.1)
         if not FULL_AUTO_ENABLED then break end
 
-        -- 타겟 탐색
         if not faTargetPlayer or not faTargetPlayer.Character then
             faTargetPlayer = faFindClosest()
             if not faTargetPlayer then task.wait(0.5); continue end
@@ -1240,22 +1310,23 @@ local function faMainLoop()
             if th then faLastHealth = th.Health end
         end
 
-        local char  = LocalPlayer.Character
-        local hum   = char and char:FindFirstChild("Humanoid")
-        local root  = char and char:FindFirstChild("HumanoidRootPart")
+        local char = LocalPlayer.Character
+        local hum  = char and char:FindFirstChild("Humanoid")
+        local root = char and char:FindFirstChild("HumanoidRootPart")
         if not char or not hum or not root then task.wait(0.5); continue end
 
         local tChar = faTargetPlayer.Character
         local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
         local tHum  = tChar and tChar:FindFirstChild("Humanoid")
-        if not tRoot or not tHum then faTargetPlayer = nil; task.wait(0.5); continue end
+        if not tRoot or not tHum then
+            faTargetPlayer = nil; task.wait(0.5); continue
+        end
 
         local curHP = hum.Health
         local now   = tick()
 
         if not faRetreatLock then
             if curHP < faLastHealth and faLastHealth > 0 then
-                -- [FIX] task.spawn으로 분리 → 루프 블로킹 없음
                 faPerformRetreat(tRoot)
             elseif not faIsRetreating and (now - faLastRetreatTime >= 2.5) then
                 faPerformRetreat(tRoot)
@@ -1263,13 +1334,24 @@ local function faMainLoop()
                 pcall(function()
                     root.CFrame = CFrame.new(tRoot.Position + Vector3.new(0, 10000, 0))
                 end)
-                task.wait(math.random(10,20)/10)
+                task.wait(math.random(10, 20) / 10)
                 faIsAbove = true
             elseif not faIsRetreating then
                 pcall(function()
                     root.CFrame = CFrame.new(tRoot.Position + Vector3.new(0, 15, 0))
                 end)
-                if faIsFirstTeleport then task.wait(2); faIsFirstTeleport = false end
+                -- [FIX-7] task.wait(2) → task.delay로 교체 (루프 블로킹 제거)
+                if faIsFirstTeleport then
+                    faIsFirstTeleport = false
+                    task.delay(2, function()
+                        -- 2초 후에도 여전히 활성이면 faLastHealth 갱신
+                        if FULL_AUTO_ENABLED then
+                            local ch2 = LocalPlayer.Character
+                            local h2  = ch2 and ch2:FindFirstChild("Humanoid")
+                            if h2 then faLastHealth = h2.Health end
+                        end
+                    end)
+                end
                 faLastHealth = curHP
             end
         end
@@ -1298,7 +1380,7 @@ local function faStop()
     faLoopActive = false
 end
 
-LocalPlayer.CharacterAdded:Connect(function(char)
+LocalPlayer.CharacterAdded:Connect(function()
     if FULL_AUTO_ENABLED then
         task.wait(1)
         faStart()
@@ -1310,70 +1392,75 @@ end)
 -- ============================================
 local function CreateToggle(name, parent, callback, configType, defaultValue)
     local container = Instance.new("Frame")
-    container.Size = UDim2.new(1, 0, 0, 24)
+    container.Size               = UDim2.new(1, 0, 0, 24)
     container.BackgroundTransparency = 1
-    container.Parent = parent
+    container.Parent             = parent
 
     local box = Instance.new("TextButton")
-    box.Size = UDim2.new(0, 14, 0, 14)
-    box.Position = UDim2.new(0, 5, 0.5, -7)
+    box.Size             = UDim2.new(0, 14, 0, 14)
+    box.Position         = UDim2.new(0, 5, 0.5, -7)
     box.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    box.Text = ""
-    box.BorderSizePixel = 0
-    box.Parent = container
+    box.Text             = ""
+    box.BorderSizePixel  = 0
+    box.Parent           = container
 
     local boxStroke = Instance.new("UIStroke")
-    boxStroke.Color = Color3.fromRGB(255, 255, 255)
-    boxStroke.Thickness = 1
+    boxStroke.Color           = Color3.fromRGB(255, 255, 255)
+    boxStroke.Thickness       = 1
     boxStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    boxStroke.Parent = box
+    boxStroke.Parent          = box
 
     local checkInner = Instance.new("Frame")
-    checkInner.Name = "CheckInner"
-    checkInner.Size = UDim2.new(1, -4, 1, -4)
-    checkInner.Position = UDim2.new(0, 2, 0, 2)
+    checkInner.Name             = "CheckInner"
+    checkInner.Size             = UDim2.new(1, -4, 1, -4)
+    checkInner.Position         = UDim2.new(0, 2, 0, 2)
     checkInner.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    checkInner.Visible = (defaultValue == true)
-    checkInner.BorderSizePixel = 0
-    checkInner.Parent = box
+    checkInner.Visible          = (defaultValue == true)
+    checkInner.BorderSizePixel  = 0
+    checkInner.Parent           = box
     table.insert(ToggleCheckInners, checkInner)
 
     local label = Instance.new("TextButton")
-    label.Size = UDim2.new(1, -100, 1, 0)
-    label.Position = UDim2.new(0, 30, 0, 0)
+    label.Size               = UDim2.new(1, -100, 1, 0)
+    label.Position           = UDim2.new(0, 30, 0, 0)
     label.BackgroundTransparency = 1
-    label.Text = name
-    label.Font = Enum.Font.Code
-    label.TextColor3 = Color3.fromRGB(255, 255, 255)
-    label.TextSize = 13
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.Parent = container
+    label.Text               = name
+    label.Font               = Enum.Font.Code
+    label.TextColor3         = Color3.fromRGB(255, 255, 255)
+    label.TextSize           = 13
+    label.TextXAlignment     = Enum.TextXAlignment.Left
+    label.Parent             = container
+
+    -- [FIX-6] 라벨을 FadeContentIn 대상으로 등록
+    RegisterFadable(label, "TextTransparency", 0)
 
     local enabled = defaultValue or false
     local function setEnabled(val)
-        enabled = val
+        enabled          = val
         checkInner.Visible = val
         if callback then callback(val) end
-        saveConfig()
+        saveConfig()  -- [FIX-2] 이미 task.defer로 비동기 처리됨
     end
     box.MouseButton1Click:Connect(function()   setEnabled(not enabled) end)
     label.MouseButton1Click:Connect(function() setEnabled(not enabled) end)
 
     if configType then
         local configBtn = Instance.new("TextButton")
-        configBtn.Size = UDim2.new(0, 60, 0, 18)
-        configBtn.Position = UDim2.new(1, -65, 0.5, -9)
+        configBtn.Size             = UDim2.new(0, 60, 0, 18)
+        configBtn.Position         = UDim2.new(1, -65, 0.5, -9)
         configBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-        configBtn.Font = Enum.Font.Code
-        configBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        configBtn.TextSize = 11
-        configBtn.BorderSizePixel = 0
-        configBtn.Parent = container
+        configBtn.Font             = Enum.Font.Code
+        configBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+        configBtn.TextSize         = 11
+        configBtn.BorderSizePixel  = 0
+        configBtn.Parent           = container
         local cs = Instance.new("UIStroke")
-        cs.Color = Color3.fromRGB(255, 255, 255)
-        cs.Thickness = 1
+        cs.Color           = Color3.fromRGB(255, 255, 255)
+        cs.Thickness       = 1
         cs.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-        cs.Parent = configBtn
+        cs.Parent          = configBtn
+        -- [FIX-6] configBtn도 등록
+        RegisterFadable(configBtn, "TextTransparency", 0)
 
         if configType == "Keybind" then
             configBtn.Text = "[" .. formatKeyName(AIM_LOCK_KEY) .. "]"
@@ -1384,7 +1471,7 @@ local function CreateToggle(name, parent, callback, configType, defaultValue)
                     local nb = input.UserInputType == Enum.UserInputType.Keyboard
                                and input.KeyCode or input.UserInputType
                     if nb ~= Enum.UserInputType.MouseMovement then
-                        AIM_LOCK_KEY = nb
+                        AIM_LOCK_KEY   = nb
                         configBtn.Text = "[" .. formatKeyName(nb) .. "]"
                         UpdateKeybindInfo(); saveConfig(); conn:Disconnect()
                     end
@@ -1397,7 +1484,7 @@ local function CreateToggle(name, parent, callback, configType, defaultValue)
                 local conn
                 conn = UserInputService.InputBegan:Connect(function(input)
                     if input.UserInputType == Enum.UserInputType.Keyboard then
-                        RAGE_BOT_KEY = input.KeyCode
+                        RAGE_BOT_KEY   = input.KeyCode
                         configBtn.Text = "[" .. formatKeyName(input.KeyCode) .. "]"
                         UpdateKeybindInfo(); saveConfig(); conn:Disconnect()
                     end
@@ -1406,18 +1493,20 @@ local function CreateToggle(name, parent, callback, configType, defaultValue)
         elseif configType == "AimMode" then
             configBtn.Text = AUTO_AIM_MODE
             configBtn.MouseButton1Click:Connect(function()
-                AUTO_AIM_MODE = (AUTO_AIM_MODE == "Silent") and "Aim" or "Silent"
+                AUTO_AIM_MODE  = (AUTO_AIM_MODE == "Silent") and "Aim" or "Silent"
                 configBtn.Text = AUTO_AIM_MODE
                 saveConfig()
             end)
         elseif configType == "MatchMode" then
             configBtn.Text = AUTO_MATCH_MODE
-            local modes = {"1v1","2v2","3v3","4v4","5v5"}
+            local modes    = {"1v1","2v2","3v3","4v4","5v5"}
             configBtn.MouseButton1Click:Connect(function()
                 local ci = 1
-                for i, m in ipairs(modes) do if m == AUTO_MATCH_MODE then ci = i; break end end
+                for i, m in ipairs(modes) do
+                    if m == AUTO_MATCH_MODE then ci = i; break end
+                end
                 AUTO_MATCH_MODE = modes[(ci % #modes) + 1]
-                configBtn.Text = AUTO_MATCH_MODE
+                configBtn.Text  = AUTO_MATCH_MODE
                 saveConfig()
             end)
         end
@@ -1427,19 +1516,21 @@ end
 
 local function CreateButton(name, parent, callback)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 140, 0, 26)
+    btn.Size             = UDim2.new(0, 140, 0, 26)
     btn.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-    btn.Text = name
-    btn.Font = Enum.Font.Code
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.TextSize = 13
-    btn.BorderSizePixel = 0
-    btn.Parent = parent
+    btn.Text             = name
+    btn.Font             = Enum.Font.Code
+    btn.TextColor3       = Color3.fromRGB(255, 255, 255)
+    btn.TextSize         = 13
+    btn.BorderSizePixel  = 0
+    btn.Parent           = parent
     local s = Instance.new("UIStroke")
-    s.Color = Color3.fromRGB(255, 255, 255)
-    s.Thickness = 1
+    s.Color           = Color3.fromRGB(255, 255, 255)
+    s.Thickness       = 1
     s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    s.Parent = btn
+    s.Parent          = btn
+    -- [FIX-6] 버튼도 등록
+    RegisterFadable(btn, "TextTransparency", 0)
     btn.MouseButton1Click:Connect(callback)
 end
 
@@ -1450,12 +1541,12 @@ local function attemptJoinMatch()
     if not AUTO_MATCH_ENABLED then return end
     task.spawn(function()
         pcall(function()
-            local remotes = SafeWait(ReplicatedStorage, "Remotes", 3)
+            local remotes = SafeWait(ReplicatedStorage, "Remotes",     3)
             if not remotes then return end
-            local mm = SafeWait(remotes, "Matchmaking", 3)
-            if not mm then return end
-            local jq = SafeWait(mm, "JoinQueue", 3)
-            if not jq then return end
+            local mm      = SafeWait(remotes,           "Matchmaking", 3)
+            if not mm     then return end
+            local jq      = SafeWait(mm,                "JoinQueue",   3)
+            if not jq     then return end
             jq:InvokeServer(AUTO_MATCH_MODE)
         end)
     end)
@@ -1564,6 +1655,10 @@ UserInputService.InputEnded:Connect(function(i)
     end
 end)
 
+-- ============================================
+-- AUTO AIM RenderStepped
+-- [FIX-1] task.wait(0.01) 완전 제거 → task.spawn으로 클릭 분리
+-- ============================================
 RunService.RenderStepped:Connect(function()
     if not AUTO_AIM_ENABLED or MainFrame.Visible then return end
     local found = false
@@ -1584,10 +1679,13 @@ RunService.RenderStepped:Connect(function()
         local now = tick()
         if now - lastClickTime >= CLICK_INTERVAL then
             lastClickTime = now
-            pcall(function()
-                VirtualInputManager:SendMouseButtonEvent(Mouse.X, Mouse.Y, 0, true, game, 0)
-                task.wait(0.01)
-                VirtualInputManager:SendMouseButtonEvent(Mouse.X, Mouse.Y, 0, false, game, 0)
+            -- [FIX-1] task.spawn으로 분리 → RenderStepped 블로킹 완전 제거
+            task.spawn(function()
+                pcall(function()
+                    VirtualInputManager:SendMouseButtonEvent(Mouse.X, Mouse.Y, 0, true,  game, 0)
+                    task.wait(0.01)
+                    VirtualInputManager:SendMouseButtonEvent(Mouse.X, Mouse.Y, 0, false, game, 0)
+                end)
             end)
         end
     end
@@ -1616,66 +1714,69 @@ local function createESP(player)
         if not root or not hum then return end
 
         local bGui = Instance.new("BillboardGui", root)
-        bGui.Name = "ESP_Gui"
-        bGui.Size = UDim2.new(4, 0, 5.5, 0)
+        bGui.Name        = "ESP_Gui"
+        bGui.Size        = UDim2.new(4, 0, 5.5, 0)
         bGui.AlwaysOnTop = true
-        bGui.Enabled = ESP_ENABLED and isEnemy(player)
+        bGui.Enabled     = ESP_ENABLED and isEnemy(player)
 
         local container = Instance.new("Frame", bGui)
-        container.Size = UDim2.new(1, 0, 1, 0)
+        container.Size               = UDim2.new(1, 0, 1, 0)
         container.BackgroundTransparency = 1
 
         local function line(s, p)
             local ol = Instance.new("Frame", container)
-            ol.BackgroundColor3 = Color3.new(0,0,0)
-            ol.BorderSizePixel = 0
-            ol.Size = UDim2.new(s.X.Scale, s.X.Offset+2, s.Y.Scale, s.Y.Offset+2)
-            ol.Position = UDim2.new(p.X.Scale, p.X.Offset-1, p.Y.Scale, p.Y.Offset-1)
-            ol.ZIndex = 1
+            ol.BackgroundColor3 = Color3.new(0, 0, 0)
+            ol.BorderSizePixel  = 0
+            ol.Size     = UDim2.new(s.X.Scale, s.X.Offset + 2, s.Y.Scale, s.Y.Offset + 2)
+            ol.Position = UDim2.new(p.X.Scale, p.X.Offset - 1, p.Y.Scale, p.Y.Offset - 1)
+            ol.ZIndex   = 1
             local f = Instance.new("Frame", container)
-            f.BackgroundColor3 = Color3.new(1,1,1)
-            f.BorderSizePixel = 0
-            f.Size = s; f.Position = p; f.ZIndex = 2
+            f.BackgroundColor3 = Color3.new(1, 1, 1)
+            f.BorderSizePixel  = 0
+            f.Size     = s
+            f.Position = p
+            f.ZIndex   = 2
         end
-        line(UDim2.new(1,0,0,1), UDim2.new(0,0,0,0))
-        line(UDim2.new(1,0,0,1), UDim2.new(0,0,1,-1))
-        line(UDim2.new(0,1,1,0), UDim2.new(0,0,0,0))
-        line(UDim2.new(0,1,1,0), UDim2.new(1,-1,0,0))
+        line(UDim2.new(1, 0, 0, 1), UDim2.new(0, 0,  0, 0))
+        line(UDim2.new(1, 0, 0, 1), UDim2.new(0, 0,  1, -1))
+        line(UDim2.new(0, 1, 1, 0), UDim2.new(0, 0,  0, 0))
+        line(UDim2.new(0, 1, 1, 0), UDim2.new(1, -1, 0, 0))
 
         local hGui = Instance.new("BillboardGui", root)
-        hGui.Name = "HealthESP_Gui"
-        hGui.Size = UDim2.new(1,0,5.5,0)
-        hGui.StudsOffset = Vector3.new(3,0,0)
-        hGui.AlwaysOnTop = true
-        hGui.Enabled = HP_BAR_ENABLED and isEnemy(player)
+        hGui.Name         = "HealthESP_Gui"
+        hGui.Size         = UDim2.new(1, 0, 5.5, 0)
+        hGui.StudsOffset  = Vector3.new(3, 0, 0)
+        hGui.AlwaysOnTop  = true
+        hGui.Enabled      = HP_BAR_ENABLED and isEnemy(player)
 
         local bg = Instance.new("Frame", hGui)
-        bg.Size = UDim2.new(0.2,0,1,0)
-        bg.BackgroundColor3 = Color3.fromRGB(50,50,50)
-        bg.BorderSizePixel = 0
+        bg.Size             = UDim2.new(0.2, 0, 1, 0)
+        bg.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        bg.BorderSizePixel  = 0
 
         local fill = Instance.new("Frame", bg)
-        fill.Size = UDim2.new(1,0,1,0)
-        fill.Position = UDim2.new(0,0,1,0)
-        fill.AnchorPoint = Vector2.new(0,1)
-        fill.BackgroundColor3 = Color3.fromRGB(0,255,0)
-        fill.BorderSizePixel = 0
+        fill.Size             = UDim2.new(1, 0, 1, 0)
+        fill.Position         = UDim2.new(0, 0, 1, 0)
+        fill.AnchorPoint      = Vector2.new(0, 1)
+        fill.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
+        fill.BorderSizePixel  = 0
 
         local txt = Instance.new("TextLabel", bg)
-        txt.Size = UDim2.new(3,0,0.2,0)
-        txt.Position = UDim2.new(1.2,0,0,0)
+        txt.Size               = UDim2.new(3, 0, 0.2, 0)
+        txt.Position           = UDim2.new(1.2, 0, 0, 0)
         txt.BackgroundTransparency = 1
-        txt.TextColor3 = Color3.new(1,1,1)
-        txt.TextScaled = true
-        txt.Font = Enum.Font.SourceSansBold
+        txt.TextColor3         = Color3.new(1, 1, 1)
+        txt.TextScaled         = true
+        txt.Font               = Enum.Font.SourceSansBold
 
         local function update()
             local pct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-            fill.Size = UDim2.new(1,0,pct,0)
-            fill.BackgroundColor3 = Color3.fromHSV(pct*0.3,1,1)
-            txt.Text = math.floor(hum.Health).."/"..math.floor(hum.MaxHealth)
+            fill.Size             = UDim2.new(1, 0, pct, 0)
+            fill.BackgroundColor3 = Color3.fromHSV(pct * 0.3, 1, 1)
+            txt.Text              = math.floor(hum.Health) .. "/" .. math.floor(hum.MaxHealth)
         end
-        hum.HealthChanged:Connect(update); update()
+        hum.HealthChanged:Connect(update)
+        update()
     end
     player.CharacterAdded:Connect(onChar)
     if player.Character then task.spawn(function() onChar(player.Character) end) end
@@ -1704,7 +1805,7 @@ end, "MatchMode", AUTO_MATCH_ENABLED)
 CreateToggle("full Auto", AimPage, function(v)
     FULL_AUTO_ENABLED = v
     if v then faStart(); createNotification("Full Auto Started")
-    else  faStop();  createNotification("Full Auto Stopped") end
+    else      faStop();  createNotification("Full Auto Stopped") end
 end, nil, FULL_AUTO_ENABLED)
 
 CreateToggle("No Cool Time (All)", AimPage, function(v)
@@ -1712,12 +1813,7 @@ CreateToggle("No Cool Time (All)", AimPage, function(v)
     if v then
         lastCooldownRemoval = 0
         removeCooldowns()
-        task.spawn(function()
-            while NO_COOL_TIME_ENABLED do
-                task.wait(10)
-                if NO_COOL_TIME_ENABLED then removeCooldowns() end
-            end
-        end)
+        startNoCoolTimeLoop()  -- [FIX-4] 단일 루프 보장
         createNotification("No Cool Time Enabled")
     else
         weaponDataCache = nil
@@ -1742,7 +1838,9 @@ CreateToggle("No spread,recoil", AimPage, function(v)
     NO_RECOIL_ENABLED = v
     if v then
         if not nrGunModule then initNoRecoilModules() end
-        task.delay(0.5, function() if NO_RECOIL_ENABLED then enableNoRecoil() end end)
+        task.delay(0.5, function()
+            if NO_RECOIL_ENABLED then enableNoRecoil() end
+        end)
     else
         disableNoRecoil()
     end
@@ -1765,7 +1863,6 @@ CreateToggle("third person", VisualPage, function(v)
     if v then enableThirdPerson() else disableThirdPerson() end
 end, nil, THIRD_PERSON_ENABLED)
 
--- [FIX] 스킨 체인저: SafeLoadstring으로 완전 비동기 처리
 CreateToggle("Load skin changer", VisualPage, function(v)
     SKIN_CHANGER_ENABLED = v
     if v then
@@ -1782,24 +1879,24 @@ end, nil, SKIN_CHANGER_ENABLED)
 CreateButton("mesh wrapping", VisualPage, function()
     local VM = workspace:FindFirstChild("ViewModels")
     local FP = VM and VM:FindFirstChild("FirstPerson")
-    if FP then
-        for _, o in ipairs(FP:GetDescendants()) do
-            if o:IsA("MeshPart") then
-                o.Material = Enum.Material.ForceField
-                o.Color = Color3.new(0,0,0)
-                for _, f in ipairs({
-                    Enum.NormalId.Top, Enum.NormalId.Bottom,
-                    Enum.NormalId.Left, Enum.NormalId.Right,
-                    Enum.NormalId.Front, Enum.NormalId.Back}) do
-                    local t = o:FindFirstChild("FixedTexture_"..f.Name)
-                           or Instance.new("Texture", o)
-                    t.Name = "FixedTexture_"..f.Name
-                    t.Texture = "rbxassetid://135989547473439"
-                    t.Face = f
-                    t.Color3 = Color3.new(0,0,0)
-                    t.StudsPerTileU = 0.1
-                    t.StudsPerTileV = 0.1
-                end
+    if not FP then return end
+    for _, o in ipairs(FP:GetDescendants()) do
+        if o:IsA("MeshPart") then
+            o.Material = Enum.Material.ForceField
+            o.Color    = Color3.new(0, 0, 0)
+            for _, f in ipairs({
+                Enum.NormalId.Top, Enum.NormalId.Bottom,
+                Enum.NormalId.Left, Enum.NormalId.Right,
+                Enum.NormalId.Front, Enum.NormalId.Back,
+            }) do
+                local t = o:FindFirstChild("FixedTexture_" .. f.Name)
+                       or Instance.new("Texture", o)
+                t.Name          = "FixedTexture_" .. f.Name
+                t.Texture       = "rbxassetid://135989547473439"
+                t.Face          = f
+                t.Color3        = Color3.new(0, 0, 0)
+                t.StudsPerTileU = 0.1
+                t.StudsPerTileV = 0.1
             end
         end
     end
@@ -1825,7 +1922,9 @@ UserInputService.InputChanged:Connect(function(input)
     end
 end)
 UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = false
+    end
 end)
 
 CloseBtn.MouseButton1Click:Connect(function()
@@ -1841,12 +1940,12 @@ local function RunLoadingSequence()
     UpdateLoadingProgress(10, "Checking Services...")
     task.wait(0.2)
     UpdateLoadingProgress(20, "Waiting for Character...")
-    -- 캐릭터 대기 루프 (최대 4초)
     for _ = 1, 40 do
         local char = LocalPlayer.Character
         if char and char:FindFirstChild("HumanoidRootPart") then break end
         task.wait(0.1)
     end
+
     UpdateLoadingProgress(30, "Setting up ESP...")
     for _, p in pairs(Players:GetPlayers()) do
         pcall(function() createESP(p) end)
@@ -1864,16 +1963,10 @@ local function RunLoadingSequence()
     if NO_COOL_TIME_ENABLED then
         lastCooldownRemoval = 0
         removeCooldowns()
-        task.spawn(function()
-            while NO_COOL_TIME_ENABLED do
-                task.wait(10)
-                if NO_COOL_TIME_ENABLED then removeCooldowns() end
-            end
-        end)
+        startNoCoolTimeLoop()  -- [FIX-4]
     end
 
     UpdateLoadingProgress(75, "Loading External Scripts...")
-    -- [FIX] 스킨체인저: SafeLoadstring으로 완전 비동기 (로딩 시퀀스 블로킹 없음)
     if SKIN_CHANGER_ENABLED then
         SafeLoadstring(
             "https://raw.githubusercontent.com/kgycoder/Rivals-Skin-changer/refs/heads/main/Rivals-Skin%20changer",
@@ -1882,7 +1975,7 @@ local function RunLoadingSequence()
     end
 
     UpdateLoadingProgress(85, "Initializing Features...")
-    if AUTO_MATCH_ENABLED then attemptJoinMatch() end
+    if AUTO_MATCH_ENABLED  then attemptJoinMatch() end
     if RAGE_BOT_ENABLED    then rbUpdateCharacterRefs() end
     if THIRD_PERSON_ENABLED then pcall(enableThirdPerson) end
     updateESPStates()
